@@ -186,7 +186,7 @@ internal static class GameStateServiceRelocationContractTests
         ["GetMultiplayerTestScene"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "a1eed6dd486e980cd805f38db2d6e6126f6c5b9e91f39961f3d74ceae1e71fd8"),
         ["GetMultiplayerTestLobby"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "c64e5bf1b51863d40e03b682a7c41d59bdb8aa28a7e51a371b5ae684d3e1b5a4"),
         ["GetStartRunLobbyMaxPlayers"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "89caae40ce1d05f6f5bb920e930dc1bcfda2bca1dee5325815e64bb8f581d275"),
-        ["EnsureFourPlayerLobby"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "2675349e298e9fcdcdc4310ef9b40f434439d416f4450202ca5aa552c5042be7"),
+        ["EnsureFourPlayerLobby"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "5373180a3dbf92f30d7fb6e33a8528bd2a6c9dd862e14c44f544a9c030deed90"),
         ["GetMultiplayerTestCharacterPaginator"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "3ab4d485ac3edcebfd40a1e5c050779e1b923bc02a93d0525f55c8cc5a55be33"),
         ["GetMultiplayerLobbyJoinHost"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "60783bd6e5a7900de14e6a49854db52e1f09849b039062668b075a9656347ae6"),
         ["GetMultiplayerLobbyJoinPort"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "d7dc9e3729c38ab6218a59e6bfdf85a2adfaaf599f3966c840cd7c72f93274cc"),
