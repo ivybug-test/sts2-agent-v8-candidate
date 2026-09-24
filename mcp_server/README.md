@@ -1,0 +1,346 @@
+# STS2 MCP Server
+
+普通玩家一起玩：**不要装本目录**。游戏内 F8 → 自动打 / 邀请队友即可。
+
+外部客户端（Cursor / Claude / Codex）：游戏内 **接入** 页打开 **原生 MCP**，复制页面上的实际地址（与 HTTP API 同一端口，不一定是 8080，更不是 8765）。不需要 Python / uv。
+
+`mcp_server/` 是可选 Python FastMCP sidecar，给开发者做 **stdio**、**layered/full** profile 和契约测试。它把 Mod 的 HTTP API 再包一层。
+
+从仓库或 GitHub 发布包根目录运行 sidecar：`scripts/start-mcp-stdio.ps1` 或
+`scripts/start-mcp-network.ps1`。发布包还带有
+`scripts/test-mcp-tool-profile.ps1`，用于不连接游戏地检查 profile 工具表面。
+
+## Tool Profile
+
+- `guided`
+  - 默认 profile
+  - 只暴露 `health_check`、`get_game_state`、`get_raw_game_state`、`get_available_actions`、`act`、`get_game_data_item`、`get_game_data_items`、`get_relevant_game_data`、`wait_for_event`、`wait_until_actionable`
+- `layered`
+  - 面向主 / 副 Agent 分层编排
+  - 在 guided 基础上额外暴露：
+    - `get_planner_context`
+    - `create_planner_handoff`
+    - `get_combat_context`
+    - `create_combat_handoff`
+    - `complete_combat_handoff`
+    - `append_combat_knowledge`
+    - `append_event_knowledge`
+    - `complete_event_handoff`
+- `full`
+  - 包含 layered 工具
+  - 另外继续暴露 legacy per-action tools，适合验证和兼容性测试
+
+## 当前工具
+
+基础状态：
+
+- `health_check`
+- `get_game_state`
+- `get_raw_game_state`
+- `get_available_actions`
+- `get_decision_log`
+- `get_run_summary`
+- `get_scene_guidance`
+- `diff_state`
+- `act`
+- `get_game_data_item`
+- `get_game_data_items`
+- `get_relevant_game_data`
+- `wait_for_event`
+- `wait_until_actionable`
+- `get_planner_context`（layered / full）
+- `create_planner_handoff`（layered / full）
+- `get_combat_context`（layered / full）
+- `create_combat_handoff`（layered / full）
+- `complete_combat_handoff`（layered / full）
+- `append_combat_knowledge`（layered / full）
+- `append_event_knowledge`（layered / full）
+- `complete_event_handoff`（layered / full）
+
+`get_game_data_item`、`get_game_data_items`、`get_relevant_game_data` 读取的元数据全部来自运行中的 Mod（`GET /data/{collection}`），包内不再附带任何游戏数据快照。
+
+只读观察类工具：
+
+- `get_run_summary`：一次调用给出当前局的角色、楼层、Act、Boss、HP、金币、能量，以及牌库 / 遗物 / 药水计数（含联机队伍块）。取的是 raw `/state` 字段，不是 compact 的改名版。
+- `get_decision_log`：最近被接受的决策及其理由，最新在最后。
+- `diff_state`：两份 `/state` 的逐路径差异（前后值），`truncated` 标明触顶。
+- `get_scene_guidance`：当前屏该用的策略规则——`MAP` 路线、`REST` 休息点、`SHOP` / Fake Merchant 商店、`COMBAT` 战斗与药水优先级、`EVENT` 选项判读；没有策略可言的屏（奖励、选牌等）返回空串。`EVENT` 屏额外带 `event_options`：离线索引给出的逐选项 handler / cost / risk 分级（**这项只有 sidecar 有**，Mod 内不带那份索引，原生 MCP 面只回策略）。
+
+`get_scene_guidance` 的策略正文与游戏内循环注入的是同一份 `skills/sts2-mcp-player/references/strategy.md`，两侧的「屏 → 章节」映射由
+`tests/test_scene_guidance_alignment.py` 逐条比对（C# 为准）。
+
+<!-- BEGIN LEGACY ACTION TOOLS -->
+<!-- The bullets below are the full profile's per-action tools. They are bound to
+     _LEGACY_ACTION_TOOLS in src/sts2_mcp/server.py by tests/test_legacy_action_coverage.py,
+     so adding or removing a legacy tool without updating both sides fails the MCP tests. -->
+
+战斗：
+
+- `play_card`
+- `end_turn`
+- `use_potion`
+- `discard_potion`
+
+房间 / 流程推进：
+
+- `continue_run`
+- `continue_game_over`
+- `abandon_run`
+- `save_and_quit`
+- `open_character_select`
+- `open_timeline`
+- `close_main_menu_submenu`
+- `choose_timeline_epoch`
+- `confirm_timeline_overlay`
+- `select_character`
+- `embark`
+- `unready`
+- `increase_ascension`
+- `decrease_ascension`
+- `switch_profile`
+- `choose_map_node`
+- `proceed`
+- `dismiss_game_over_wait`
+- `confirm_unlock`
+- `close_cards_view`
+- `open_chest`
+- `choose_treasure_relic`
+- `choose_event_option`
+- `crystal_set_tool`
+- `crystal_clear_cell`
+- `choose_rest_option`
+- `open_shop_inventory`
+- `close_shop_inventory`
+- `buy_card`
+- `buy_relic`
+- `buy_potion`
+- `remove_card_at_shop`
+- `return_to_main_menu`
+
+多人 / 组队：
+
+- `host_multiplayer_lobby`
+- `join_multiplayer_lobby`
+- `ready_multiplayer_lobby`
+- `disconnect_multiplayer_lobby`
+- `invite_ai_teammate`
+- `continue_ai_teammate`
+
+奖励 / 选牌：
+
+- `claim_reward`
+- `choose_reward_card`
+- `skip_reward_cards`
+- `collect_rewards_and_proceed`
+- `resolve_rewards`
+  - 可省略 `option_index`（默认取第一张奖励牌），也可改用向后兼容的 `card_index` 别名
+- `select_deck_card`
+- `confirm_selection`
+- `choose_capstone_option`
+- `choose_bundle`
+- `confirm_bundle`
+
+Modal：
+
+- `confirm_modal`
+- `dismiss_modal`
+<!-- END LEGACY ACTION TOOLS -->
+
+开发期调试：
+
+- `run_console_command`
+  - 仅当 `STS2_ENABLE_DEBUG_ACTIONS=1` 时注册
+  - 默认关闭
+  - 只用于开发和验证，不应成为正式游玩流程的常规依赖
+- `inject_event_churn`
+  - 仅当 `STS2_ENABLE_DEBUG_ACTIONS=1` 时注册
+  - 发布 N 条 `debug_churn` 合成事件（`option_index`，0 用 mod 默认值），用来在实机里把
+    `/events/stream` 慢订阅者的队列顶满，验证「满队列关闭该订阅者」而不是静默丢事件
+  - `option_index` 必须大于单订阅者队列容量（256），否则 mod 返回 400 `invalid_request`
+
+## 状态视图与等待
+
+- `get_game_state` 返回 compact `agent_view`，并附带 `compact_agent_view: true`
+- Mod 未暴露 `agent_view` 时回退返回完整 `/state`，并附带 `compact_agent_view: false`；这是降级信号，不是常规 compact 契约
+- 需要完整原始状态时用 `get_raw_game_state`
+- compact 商店打开标志是 `shop.open`（raw state 里才是 `shop.is_open`）
+- `wait_until_actionable` 同时返回 `matched`（是否有事件命中）和 `actionable`（新状态是否已有非被动动作）；`actionable` 与原生 MCP server 的字段名一致
+
+## 降低模型误调用的建议
+
+这个 MCP 已经不算小，所以真正影响稳定性的，不只是“工具有没有”，还包括“模型是不是按正确节奏调用”。
+
+推荐约束：
+
+1. 会话开始先调 `health_check`。
+2. 每次决策前都调 `get_game_state`。
+3. 只调用当前 `available_actions` 里出现的动作。
+4. 调用 `act` 时附一条简短的 `reason`，供玩家界面与决策日志解释本步选择；
+   协议上可省略，但 agent 应把它当作常规参数。
+5. 每次动作后重新读取状态，不复用旧索引。
+6. 优先用高层动作，不要把可合并流程拆碎。
+
+`guided` / `layered` profile 使用统一 `act` 工具时，水晶球动作额外接受
+`x`、`y`、`tool`：`crystal_clear_cell` 必须传坐标，可选在同一调用传
+`tool="big"|"small"`；`crystal_set_tool` 只传 `tool`。完整棋盘来自
+`get_game_state().crystal_sphere`。
+
+高层动作优先级：
+
+- 奖励房间优先 `collect_rewards_and_proceed`
+- 休息点优先 `choose_rest_option`
+- 商店先 `open_shop_inventory`，离开内层库存先 `close_shop_inventory`
+- 宝箱必须 `open_chest -> choose_treasure_relic -> proceed`
+- `MODAL` 出现时优先 `confirm_modal` / `dismiss_modal`
+
+## 推荐配套 Skill
+
+用外部 AI Agent 经 MCP 操作本 Mod 时，请同时加载：
+
+- [sts2-mcp-player](../skills/sts2-mcp-player/SKILL.md)
+
+游戏内自动游玩已经按这份合同决策。外部客户端只接 MCP 工具、不加载 skill，也能点合法动作；要接近游戏内自动游玩的效果，需要配套 skill。
+
+## 费用字段说明
+
+所有主要卡牌 payload 现在都同时暴露：
+
+- `costs_x`
+  - 是否为能量 X 费卡
+- `star_costs_x`
+  - 是否为星星 X 费卡
+- `energy_cost`
+  - 当前能量消耗，包含战斗中的临时修正
+- `star_cost`
+  - 当前星星消耗，包含战斗中的临时修正
+
+这很重要，因为 STS2 里有两类容易让模型误判的动态情况：
+
+- 能量费在战斗中被临时改写，例如 `Bullet Time`
+- 星星费 / 星星 X 费会随当前星数变化，例如 `Stardust`
+
+## 环境变量
+
+- `STS2_API_BASE_URL`
+  - 默认：`http://127.0.0.1:8080`
+- `STS2_AGENT_REPO_ROOT`
+  - 默认：自动探测（从 `sts2_mcp` 包位置向上查找含 `mcp_server/pyproject.toml` 的目录）
+  - 作用：定位仓库根，进而定位默认知识库与 `reference_files` 里的 `docs/game-knowledge/*.md`
+  - wheel / pipx 安装态探测不到仓库根时不再猜测路径，`reference_files` 会返回空列表
+- `STS2_AGENT_KNOWLEDGE_DIR`
+  - 默认：仓库根目录下的 `agent_knowledge/`；不在仓库检出内时回退到当前工作目录的 `agent_knowledge/`，并打一条 WARNING 日志（不会写进 Python 安装目录）
+  - 作用：保存 combat / event 的运行时知识文件
+- `STS2_API_READ_TIMEOUT`
+  - 默认：`10`（秒）
+  - 作用：`GET` 请求与状态对账的读取超时
+- `STS2_API_ACTION_TIMEOUT`
+  - 默认：`75`（秒）
+  - 作用：`POST /action` 的读取超时。动作会等游戏稳定后才返回（`continue_game_over` 最多等 60 秒原生存档），因此必须明显长于读取超时
+- `STS2_API_MAX_RETRIES`
+  - 默认：`2`
+  - 作用：可重试的读取类请求的重试次数；动作请求从不自动重放
+- `STS2_ENABLE_DEBUG_ACTIONS`
+  - 默认：未设置 / `0`
+  - 作用：启用开发期 debug 工具，例如 `run_console_command`、`inject_event_churn`
+  - 发布建议：保持关闭
+
+## 运行时知识库
+
+`layered` / `full` profile 会按稳定 id 自动维护一个简单知识库：
+
+```text
+agent_knowledge/
+  combat/
+    global/
+      solo/
+        cultist_x1.md
+      groups/
+        cultist_x2+slime_large_x1.md
+  events/
+    global/
+      cleric.md
+```
+
+约束：
+
+- 战斗文件按 `enemy_id_xcount` 聚合并排序，不依赖本地化名字
+- 事件文件按 `event_id` 命名
+- 当前还没有 chapter 字段时，目录先落在 `global/`
+- 追加内容时会自动带上 `run_id`、`floor`、`screen`、UTC 时间戳
+- 不在仓库检出内时（wheel / pipx 安装态）不再猜测路径：知识库落到当前工作目录的 `agent_knowledge/`，并用 `STS2_AGENT_KNOWLEDGE_DIR` 可固定到指定位置
+
+## 主 / 副 Agent 交接
+
+如果你采用“主 Agent 负责路线和房间决策，副 Agent 专管战斗”的结构，推荐这样接：
+
+1. 主 Agent 每次非战斗决策前调用 `create_planner_handoff`
+2. 当 `screen=COMBAT` 时，主 Agent 调用 `create_combat_handoff`，并把返回包整体交给战斗 Agent
+3. 战斗 Agent 在战斗结束后调用 `complete_combat_handoff`
+4. 主 Agent 把 `planner_summary` 当作上一场战斗的压缩记忆，再继续下一次 `create_planner_handoff`
+
+事件也可以用类似方式：
+
+1. 主 Agent 根据 `create_planner_handoff` 中的 `event` 和 `event_knowledge` 决策
+2. 事件结算后调用 `complete_event_handoff` 写回结果
+
+## 本地启动
+
+```powershell
+cd "<repo-root>/mcp_server"
+uv sync
+uv run sts2-mcp-server
+```
+
+默认通过 `stdio` 运行，适合直接接入 MCP 客户端。
+
+## 开发期验证脚本（源码仓库）
+
+下面的启动游戏和 debug 命令需要完整源码仓库以及本地游戏。发布包只带
+上面列出的 sidecar 启动 / profile 检查脚本；不要在发布包中寻找这些实机脚本。
+
+运行 MCP 单元测试（标准库 unittest，不需要游戏；CI 执行的就是同一条命令）：
+
+```powershell
+cd "<repo-root>/mcp_server"
+uv run --locked python -m unittest discover -s tests -v
+```
+
+启动游戏并保持运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "<repo-root>/scripts/start-game-session.ps1" -EnableDebugActions
+```
+
+验证 debug 工具默认关闭 / 显式开启：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "<repo-root>/scripts/test-debug-console-gating.ps1"
+powershell -ExecutionPolicy Bypass -File "<repo-root>/scripts/test-debug-console-gating.ps1" -EnableDebugActions
+```
+
+## 快速自检
+
+只验证 Python 包装层可导入：
+
+```powershell
+cd "<repo-root>/mcp_server"
+uv run python -c "from sts2_mcp.server import create_server; create_server(); print('MCP_IMPORT_OK')"
+```
+
+在 Mod 已运行时读取状态：
+
+```powershell
+cd "<repo-root>/mcp_server"
+uv run python -c "from sts2_mcp.client import Sts2Client; import json; print(json.dumps(Sts2Client().get_state(), ensure_ascii=False, indent=2))"
+```
+
+## 发布前最低要求
+
+```powershell
+dotnet build "<repo-root>/STS2AIAgent/STS2AIAgent.csproj" -c Release
+python -m py_compile "<repo-root>/mcp_server/src/sts2_mcp/client.py" "<repo-root>/mcp_server/src/sts2_mcp/server.py"
+cd "<repo-root>/mcp_server"
+uv run python -c "from sts2_mcp.server import create_server; create_server(); print('MCP_IMPORT_OK')"
+```
+
+发布流程入口见 [release-readiness.md](../docs/release-readiness.md)；当前版本、验收证据与剩余缺口见 [当前状态页](https://github.com/CharTyr/STS2-Agent/blob/main/PRODUCT_PLAN_CURRENT.md)。

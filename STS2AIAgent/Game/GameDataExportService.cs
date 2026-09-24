@@ -1,0 +1,524 @@
+using System.Collections;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using MegaCrit.Sts2.Core.CardSelection;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.addons.mega_text;
+
+namespace STS2AIAgent.Game;
+
+internal static class GameDataExportService
+{
+    private static readonly Regex CardMarkupRegex = new(@"\[(?:/?[^\]]+)\]", RegexOptions.Compiled);
+    private static readonly Regex CardWhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
+
+    public static object ExportCollection(string collection)
+    {
+        return collection.Trim().ToLowerInvariant() switch
+        {
+            "cards" => ExportCards(),
+            "relics" => ExportRelics(),
+            "monsters" => ExportMonsters(),
+            "potions" => ExportPotions(),
+            "events" => ExportEvents(),
+            "powers" => ExportPowers(),
+            "characters" => ExportCharacters(),
+            _ => throw new KeyNotFoundException($"Unknown data collection: {collection}")
+        };
+    }
+
+    private static object ExportCards()
+    {
+        return ModelDb.AllCards
+            .OrderBy(card => card.Id.Entry, StringComparer.Ordinal)
+            .Select(card =>
+            {
+                var dynamicValues = BuildCardDynamicValuePayloads(card);
+                return new
+                {
+                    id = card.Id.Entry,
+                    name = card.Title,
+                    description = GetResolvedCardRulesText(card),
+                    description_raw = GetCardRulesText(card),
+                    type = card.Type.ToString(),
+                    rarity = card.Rarity.ToString(),
+                    target = card.TargetType.ToString(),
+                    cost = card.EnergyCost.Canonical,
+                    is_x_cost = card.EnergyCost.CostsX,
+                    star_cost = card.CanonicalStarCost >= 0 ? (int?)card.CanonicalStarCost : null,
+                    is_x_star_cost = card.HasStarCostX,
+                    color = GetCardColor(card),
+                    damage = FindDynamicValue(dynamicValues, "damage"),
+                    block = FindDynamicValue(dynamicValues, "block"),
+                    keywords = card.Keywords.Select(keyword => keyword.ToString()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+                    tags = card.Tags.Select(tag => tag.ToString()).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+                    vars = dynamicValues.Select(value => new
+                    {
+                        name = value.Name,
+                        base_value = value.BaseValue,
+                        current_value = value.CurrentValue,
+                        enchanted_value = value.EnchantedValue,
+                        is_modified = value.IsModified,
+                        was_just_upgraded = value.WasJustUpgraded
+                    }).ToArray(),
+                    upgrade = BuildCardUpgradePreview(card)
+                };
+            })
+            .ToArray();
+    }
+
+    private static object ExportRelics()
+    {
+        return ModelDb.AllRelics
+            .OrderBy(relic => relic.Id.Entry, StringComparer.Ordinal)
+            .Select(relic => new
+            {
+                id = relic.Id.Entry,
+                name = ResolveText(relic.Title),
+                description = RawTextOrNull(() => relic.DynamicDescription),
+                rarity = relic.Rarity.ToString(),
+                pool = relic.Pool.ToString().ToLowerInvariant(),
+                is_melted = relic.IsMelted
+            })
+            .ToArray();
+    }
+
+    private static object ExportPotions()
+    {
+        return ModelDb.AllPotions
+            .OrderBy(potion => potion.Id.Entry, StringComparer.Ordinal)
+            .Select(potion => new
+            {
+                id = potion.Id.Entry,
+                name = ResolveText(potion.Title),
+                description = RawTextOrNull(() => potion.DynamicDescription),
+                rarity = potion.Rarity.ToString(),
+                pool = potion.Pool.ToString().ToLowerInvariant(),
+                usage = potion.Usage.ToString(),
+                target_type = potion.TargetType.ToString()
+            })
+            .ToArray();
+    }
+
+    private static object ExportEvents()
+    {
+        return ModelDb.AllEvents
+            .OrderBy(eventModel => eventModel.Id.Entry, StringComparer.Ordinal)
+            .Select(eventModel => new
+            {
+                id = eventModel.Id.Entry,
+                name = ResolveText(eventModel.Title),
+                type = eventModel is AncientEventModel ? "Ancient" : "Event",
+                act = ResolveEventAct(eventModel),
+                description = ResolveText(eventModel.InitialDescription),
+                options = BuildEventOptions(eventModel)
+            })
+            .ToArray();
+    }
+
+    private static object ExportPowers()
+    {
+        return ModelDb.AllPowers
+            .OrderBy(power => power.Id.Entry, StringComparer.Ordinal)
+            .Select(power => new
+            {
+                id = power.Id.Entry,
+                name = ResolveText(power.Title),
+                description = ResolveText(power.Description),
+                type = power.Type.ToString(),
+                stack_type = power.StackType.ToString(),
+                allow_negative = power.AllowNegative
+            })
+            .ToArray();
+    }
+
+    private static object ExportCharacters()
+    {
+        return ModelDb.AllCharacters
+            .OrderBy(character => character.Id.Entry, StringComparer.Ordinal)
+            .Select(character => new
+            {
+                id = character.Id.Entry,
+                name = ResolveText(character.Title),
+                description = LocString.GetIfExists("characters", character.Id.Entry + ".description")?.GetFormattedText(),
+                starting_hp = character.StartingHp,
+                starting_gold = character.StartingGold,
+                max_energy = character.MaxEnergy,
+                orb_slots = character.BaseOrbSlotCount,
+                gender = character.Gender.ToString(),
+                color = character.CardPool.Title.ToLowerInvariant(),
+                starting_deck = character.StartingDeck.Select(card => card.Id.Entry).ToArray(),
+                starting_relics = character.StartingRelics.Select(relic => relic.Id.Entry).ToArray(),
+                starting_potions = character.StartingPotions.Select(potion => potion.Id.Entry).ToArray()
+            })
+            .ToArray();
+    }
+
+    private static object ExportMonsters()
+    {
+        return ModelDb.Monsters
+            .OrderBy(monster => monster.Id.Entry, StringComparer.Ordinal)
+            .Select(monster => new
+            {
+                id = monster.Id.Entry,
+                name = ResolveText(monster.Title),
+                type = ResolveMonsterType(monster),
+                min_hp = monster.MinInitialHp,
+                max_hp = monster.MaxInitialHp,
+                moves = BuildMonsterMoves(monster),
+                damage_values = (object?)null,
+                block_values = (object?)null
+            })
+            .ToArray();
+    }
+
+    private static string GetCardColor(CardModel card)
+    {
+        if (card.Pool.IsColorless)
+        {
+            return "colorless";
+        }
+
+        return card.Pool.Title.ToLowerInvariant();
+    }
+
+    private static string ResolveEventAct(EventModel eventModel)
+    {
+        var act = ModelDb.Acts.FirstOrDefault(candidate => candidate.AllEvents.Contains(eventModel));
+        return act == null ? "Shared" : ResolveText(act.Title) ?? "Shared";
+    }
+
+    private static string ResolveMonsterType(MonsterModel monster)
+    {
+        var roomType = ModelDb.AllEncounters
+            .Where(encounter => encounter.AllPossibleMonsters.Contains(monster))
+            .Select(encounter => encounter.RoomType)
+            .OrderByDescending(value => value)
+            .FirstOrDefault();
+
+        return roomType switch
+        {
+            RoomType.Boss => "Boss",
+            RoomType.Elite => "Elite",
+            RoomType.Monster => "Normal",
+            _ => "Unknown"
+        };
+    }
+
+    private static object[] BuildMonsterMoves(MonsterModel monster)
+    {
+        // The localization base is whatever the monster's own Title is keyed under, not its id. For
+        // almost every monster the two agree (`X.name` -> `X`). They differ when monsters share their
+        // text: the three DECIMILLIPEDE_SEGMENT_* segments are all titled `DECIMILLIPEDE_SEGMENT.name`,
+        // so keying by id found nothing and all three exported `moves: []`.
+        var locBase = LocalizationBase(monster);
+        var prefix = $"{locBase}.moves.";
+
+        // This used to read a public MonsterModel.MoveNames property by reflection. The game removed
+        // that property, the lookup returned null, and every monster in GET /data/monsters exported
+        // `moves: []` with nothing anywhere saying so. MoveNames was only ever this table query, and
+        // everything in it is public, so it is called directly now: if the game renames any of it,
+        // the build fails instead of the export quietly emptying.
+        IEnumerable moveNames;
+        try
+        {
+            moveNames = LocManager.Instance.GetTable("monsters").GetLocStringsWithPrefix(locBase + ".moves");
+        }
+        catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException or NullReferenceException)
+        {
+            // The table is created by the game's localization manager; before it is loaded there is
+            // nothing to export, which is a state, not a defect.
+            return Array.Empty<object>();
+        }
+
+        // A move's name is its `.title` key -- the game builds exactly that in
+        // MonsterModel.GetBestiaryMoveName: `{Id}.moves.{moveId}.title`. The same prefix also holds
+        // the move's dialogue (`banter`, `speakLine`, `speakLineInitial`, `deadDoorSpeakLine`), and
+        // exporting every entry under it made FAKE_MERCHANT_MONSTER's ENRAGE appear three times, two
+        // of them taunts. Live on 2026-09-18, nine monsters carried duplicates like that.
+        return moveNames
+            .Cast<object>()
+            .Select(locString => (locString, key: GetLocEntryKey(locString)))
+            .Where(entry => entry.key.StartsWith(prefix, StringComparison.Ordinal) &&
+                            entry.key.EndsWith(MoveTitleSuffix, StringComparison.Ordinal))
+            .Select(entry => new
+            {
+                id = ExtractKeySegment(entry.key, prefix),
+                name = GetFormattedLocString(entry.locString)
+            })
+            .ToArray<object>();
+    }
+
+    private const string MoveTitleSuffix = ".title";
+
+    private static string LocalizationBase(MonsterModel monster)
+    {
+        var titleKey = monster.Title?.LocEntryKey;
+        return !string.IsNullOrEmpty(titleKey) && titleKey.EndsWith(".name", StringComparison.Ordinal)
+            ? TrimKnownSuffix(titleKey, ".name")
+            : monster.Id.Entry;
+    }
+
+    private static string GetLocEntryKey(object value)
+    {
+        if (value is LocString locString)
+        {
+            return locString.LocEntryKey;
+        }
+
+        return value.GetType().GetProperty("LocEntryKey", BindingFlags.Public | BindingFlags.Instance)?.GetValue(value) as string
+            ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Formats a localized string, or returns null when its table has no entry for it.
+    /// <para>
+    /// ModelDb carries entries the localization tables do not cover - a MOCK_ power, for example -
+    /// and <c>GetFormattedText</c> throws for those. Formatting one such entry used to turn the whole
+    /// collection into a 500, so every exported name goes through this check instead.
+    /// </para>
+    /// </summary>
+    private static string? ResolveText(LocString? locString)
+    {
+        return locString != null && locString.Exists() ? locString.GetFormattedText() : null;
+    }
+
+    private static string GetFormattedLocString(object value)
+    {
+        if (value is LocString locString)
+        {
+            return ResolveText(locString) ?? string.Empty;
+        }
+
+        return value.GetType().GetMethod("GetFormattedText", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null)
+            ?.Invoke(value, null) as string
+            ?? string.Empty;
+    }
+
+    private static object[] BuildEventOptions(EventModel eventModel)
+    {
+        try
+        {
+            var prefix = $"{eventModel.Id.Entry}.pages.INITIAL.options.";
+            return eventModel.GameInfoOptions
+                .Select(locString => locString.LocEntryKey)
+                .Select(key => TrimKnownSuffix(key, ".title"))
+                .Select(key => TrimKnownSuffix(key, ".description"))
+                .Where(key => key.StartsWith(prefix, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .Select(key => new
+                {
+                    id = ExtractKeySegment(key, prefix),
+                    title = ResolveText(eventModel.GetOptionTitle(key)) ?? string.Empty,
+                    description = ResolveText(eventModel.GetOptionDescription(key)) ?? string.Empty
+                })
+                .ToArray<object>();
+        }
+        catch
+        {
+            return Array.Empty<object>();
+        }
+    }
+
+    private static string ExtractKeySegment(string key, string prefix)
+    {
+        if (!key.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return key;
+        }
+
+        var suffix = key[prefix.Length..];
+        var separator = suffix.IndexOf('.');
+        return separator >= 0 ? suffix[..separator] : suffix;
+    }
+
+    private static string TrimKnownSuffix(string value, string suffix)
+    {
+        return value.EndsWith(suffix, StringComparison.Ordinal)
+            ? value[..^suffix.Length]
+            : value;
+    }
+
+    private static object? BuildCardUpgradePreview(CardModel card)
+    {
+        try
+        {
+            var preview = NormalizeCardRulesText(card.GetDescriptionForUpgradePreview());
+            if (!string.IsNullOrWhiteSpace(preview))
+            {
+                return new
+                {
+                    description = preview
+                };
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static int? FindDynamicValue(CardDynamicValueInfo[] values, string name)
+    {
+        foreach (var value in values)
+        {
+            if (value.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return value.CurrentValue;
+            }
+        }
+
+        return null;
+    }
+
+    private static CardDynamicValueInfo[] BuildCardDynamicValuePayloads(CardModel? card)
+    {
+        if (card == null)
+        {
+            return Array.Empty<CardDynamicValueInfo>();
+        }
+
+        try
+        {
+            var previewSet = card.DynamicVars.Clone(card);
+            card.UpdateDynamicVarPreview(CardPreviewMode.Normal, card.CurrentTarget, previewSet);
+
+            return previewSet.Values
+                .Select(dynamicVar => new CardDynamicValueInfo(
+                    dynamicVar.Name,
+                    (int)dynamicVar.BaseValue,
+                    (int)dynamicVar.PreviewValue,
+                    (int)dynamicVar.EnchantedValue,
+                    (int)dynamicVar.PreviewValue != (int)dynamicVar.BaseValue
+                        || (int)dynamicVar.EnchantedValue != (int)dynamicVar.BaseValue,
+                    dynamicVar.WasJustUpgraded))
+                .OrderBy(value => value.Name, StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<CardDynamicValueInfo>();
+        }
+    }
+
+    private static string GetCardRulesText(CardModel? card)
+    {
+        if (card == null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var rawDescription = card.Description?.GetRawText();
+            if (!string.IsNullOrWhiteSpace(rawDescription))
+            {
+                return NormalizeCardRulesText(rawDescription);
+            }
+        }
+        catch
+        {
+        }
+
+        // The same Description, coerced another way when its raw text is empty. This used to try five
+        // more names -- RulesText, Body, Text, RawText, DescriptionText -- none of which CardModel has.
+        var coerced = TryCoerceText(card.Description);
+        return string.IsNullOrWhiteSpace(coerced) ? string.Empty : NormalizeCardRulesText(coerced);
+    }
+
+    private static string GetResolvedCardRulesText(CardModel? card)
+    {
+        if (card == null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            card.UpdateDynamicVarPreview(CardPreviewMode.Normal, card.CurrentTarget, card.DynamicVars);
+            var pileType = card.Pile?.Type ?? PileType.None;
+            var resolved = card.GetDescriptionForPile(pileType, card.CurrentTarget);
+            if (!string.IsNullOrWhiteSpace(resolved))
+            {
+                return NormalizeCardRulesText(resolved);
+            }
+        }
+        catch
+        {
+        }
+
+        return GetCardRulesText(card);
+    }
+
+    private static string TryCoerceText(object? value)
+    {
+        if (value == null)
+        {
+            return string.Empty;
+        }
+
+        if (value is string text)
+        {
+            return text;
+        }
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var valueType = value.GetType();
+
+        try
+        {
+            var getRawText = valueType.GetMethod("GetRawText", flags, null, Type.EmptyTypes, null);
+            if (getRawText != null && getRawText.ReturnType == typeof(string))
+            {
+                return getRawText.Invoke(value, null) as string ?? string.Empty;
+            }
+        }
+        catch
+        {
+        }
+
+        return value.ToString() ?? string.Empty;
+    }
+
+    private static string NormalizeCardRulesText(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = CardMarkupRegex.Replace(value, string.Empty);
+        normalized = CardWhitespaceRegex.Replace(normalized, " ");
+        return normalized.Trim();
+    }
+
+    /// <summary>The raw text of a localized string, or null when it is empty or cannot be read.</summary>
+    /// <remarks>
+    /// Replaces a by-name lookup of DynamicDescription then Description. Description's getter is
+    /// private and that lookup saw public properties only, so the second name never resolved.
+    /// </remarks>
+    private static string? RawTextOrNull(Func<LocString?> read)
+    {
+        try
+        {
+            var text = read()?.GetRawText();
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NullReferenceException or KeyNotFoundException or FormatException)
+        {
+            return null;
+        }
+    }
+
+    private readonly record struct CardDynamicValueInfo(
+        string Name,
+        int BaseValue,
+        int CurrentValue,
+        int EnchantedValue,
+        bool IsModified,
+        bool WasJustUpgraded);
+}

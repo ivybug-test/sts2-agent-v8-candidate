@@ -1,0 +1,366 @@
+using System.Text.RegularExpressions;
+
+namespace STS2AIAgent.Tests;
+
+/// <summary>
+/// Source-contract coverage for the screen names the mod resolves and the predicates that make the
+/// previously dead-end screens actionable. GameStateService.cs is not part of the offline compile, so
+/// the mapping table, the widened guards, and the shared Fake Merchant helper are pinned from source.
+/// </summary>
+internal static class ScreenResolutionContractTests
+{
+    private static readonly (string ScreenType, string ScreenName)[] ExpectedMappings =
+    {
+        ("NGameOverScreen", "GAME_OVER"),
+        ("NCardRewardSelectionScreen", "REWARD"),
+        ("NChooseACardSelectionScreen", "CARD_SELECTION"),
+        ("NDeckCardSelectScreen or NDeckUpgradeSelectScreen or NDeckTransformSelectScreen or NDeckEnchantSelectScreen", "CARD_SELECTION"),
+        ("NCardGridSelectionScreen", "CARD_SELECTION"),
+        ("NRewardsScreen", "REWARD"),
+        ("NTreasureRoom or NTreasureRoomRelicCollection", "CHEST"),
+        ("NRestSiteRoom", "REST"),
+        ("NMerchantRoom or NMerchantInventory", "SHOP"),
+        ("NEventRoom", "EVENT"),
+        ("NCombatRoom", "COMBAT"),
+        ("NMapScreen or NMapRoom", "MAP"),
+        ("NCharacterSelectScreen", "CHARACTER_SELECT"),
+        ("NMultiplayerLoadGameScreen", "MULTIPLAYER_LOAD"),
+        ("NChooseABundleSelectionScreen", "BUNDLE_SELECTION"),
+        ("NCapstoneSubmenuStack", "CAPSTONE_SELECTION"),
+        ("NCrystalSphereScreen", "CRYSTAL_SPHERE"),
+        ("NTimelineScreen", "TIMELINE"),
+        ("NFakeMerchant", "FAKE_MERCHANT"),
+        ("NPatchNotesScreen", "PATCH_NOTES"),
+        ("NInspectCardScreen", "CARD_INSPECT"),
+        ("NInspectRelicScreen", "RELIC_INSPECT"),
+        ("NSendFeedbackScreen", "FEEDBACK"),
+        ("NSubmenu", "MAIN_MENU"),
+        ("NLogoAnimation", "MAIN_MENU"),
+        ("NMainMenu", "MAIN_MENU"),
+        ("_", "UNKNOWN"),
+    };
+
+    public static void EveryScreenMappingIsPinned()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var body = AgentSourceFixture.MethodBody(rawState, "ResolveNonModalScreen");
+        var actual = SwitchMappings(body).ToDictionary(pair => pair.ScreenType, pair => pair.ScreenName);
+
+        Assert.Equal(ExpectedMappings.Length, actual.Count);
+        foreach (var (screenType, screenName) in ExpectedMappings)
+        {
+            Assert.True(actual.TryGetValue(screenType, out var resolved), $"ResolveNonModalScreen must map {screenType}.");
+            Assert.Equal(screenName, resolved);
+        }
+
+        // These names are the exact strings the sibling skill/documentation tasks publish.
+        Assert.Equal("FAKE_MERCHANT", actual["NFakeMerchant"]);
+        Assert.Equal("PATCH_NOTES", actual["NPatchNotesScreen"]);
+        Assert.Equal("CARD_INSPECT", actual["NInspectCardScreen"]);
+        Assert.Equal("RELIC_INSPECT", actual["NInspectRelicScreen"]);
+        Assert.Equal("FEEDBACK", actual["NSendFeedbackScreen"]);
+    }
+
+    public static void FakeMerchantOpensThroughTheSharedButton()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var canOpen = Normalize(
+            AgentSourceFixture.DeclarationBody(rawState, "public static bool CanOpenShopInventory("));
+        Assert.Contains("currentScreen is NMerchantRoom room", canOpen, StringComparison.Ordinal);
+        Assert.Contains("room.Inventory != null && !room.Inventory.IsOpen", canOpen, StringComparison.Ordinal);
+        Assert.Contains("return GetFakeMerchantButton(currentScreen) != null;", canOpen, StringComparison.Ordinal);
+
+        var helper = Normalize(
+            AgentSourceFixture.DeclarationBody(rawState, "public static NMerchantButton? GetFakeMerchantButton("));
+        Assert.Contains("currentScreen is not NFakeMerchant fakeMerchant", helper, StringComparison.Ordinal);
+        Assert.Contains("fakeMerchant.MerchantButton is not { } merchantButton", helper, StringComparison.Ordinal);
+        Assert.Contains("GodotObject.IsInstanceValid(merchantButton)", helper, StringComparison.Ordinal);
+        Assert.Contains("merchantButton.IsVisibleInTree()", helper, StringComparison.Ordinal);
+        Assert.Contains("merchantButton.IsEnabled", helper, StringComparison.Ordinal);
+        // NMerchantButton.OnRelease plays dialogue instead of emitting MerchantOpened for a dead
+        // local player, so the advertised button must exclude that state too.
+        Assert.Contains("merchantButton.IsLocalPlayerDead", helper, StringComparison.Ordinal);
+        Assert.Contains("NMerchantInventory>(\"%Inventory\")", helper, StringComparison.Ordinal);
+        Assert.Contains("inventory != null && inventory.IsOpen ? null : merchantButton", helper, StringComparison.Ordinal);
+
+        var rawAction = AgentSourceFixture.ReadActionService();
+        var open = Normalize(AgentSourceFixture.MethodBody(rawAction, "ExecuteOpenShopInventoryAsync"));
+        Assert.Contains("if (!GameStateService.CanOpenShopInventory(currentScreen))", open, StringComparison.Ordinal);
+        Assert.Contains("var fakeMerchantButton = GameStateService.GetFakeMerchantButton(currentScreen);", open, StringComparison.Ordinal);
+        Assert.Contains("merchantRoom.OpenInventory();", open, StringComparison.Ordinal);
+        Assert.Contains("fakeMerchantButton.ForceClick();", open, StringComparison.Ordinal);
+        Assert.Contains("WaitForShopInventoryOpenAsync(TimeSpan.FromSeconds(10))", open, StringComparison.Ordinal);
+    }
+
+    public static void PatchNotesClosePathIsWidenedWithoutWeakeningSubmenus()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var canClose = Normalize(AgentSourceFixture.MethodBody(rawState, "CanCloseMainMenuSubmenu"));
+        Assert.Contains("currentScreen is NPatchNotesScreen patchNotes", canClose, StringComparison.Ordinal);
+        Assert.Contains("GodotObject.IsInstanceValid(patchNotes) && patchNotes.IsVisibleInTree()", canClose, StringComparison.Ordinal);
+        Assert.Contains("currentScreen is not NSubmenu submenu || !submenu.IsVisibleInTree()", canClose, StringComparison.Ordinal);
+        Assert.Contains("submenuStack != null && submenuStack.SubmenusOpen", canClose, StringComparison.Ordinal);
+
+        var rawAction = AgentSourceFixture.ReadActionService();
+        var close = Normalize(AgentSourceFixture.MethodBody(rawAction, "ExecuteCloseMainMenuSubmenuAsync"));
+        Assert.Contains("currentScreen is NPatchNotesScreen patchNotes", close, StringComparison.Ordinal);
+        // The patch notes back button is a private field, so it is read through the registry that
+        // probes it at load -- not through a lookup of its own that could disagree with the probe.
+        Assert.Contains("ReflectedGameMembers.Field(typeof(NPatchNotesScreen), \"_backButton\")?.GetValue(patchNotes) as NButton", close, StringComparison.Ordinal);
+        Assert.Contains("backButton.ForceClick();", close, StringComparison.Ordinal);
+        Assert.Contains("((Node)patchNotes).Call(NPatchNotesScreen.MethodName.Close);", close, StringComparison.Ordinal);
+        Assert.Contains("WaitForPatchNotesCloseAsync(patchNotes, TimeSpan.FromSeconds(10))", close, StringComparison.Ordinal);
+        Assert.Contains("submenuStack.Pop();", close, StringComparison.Ordinal);
+
+        // The existing submenu wait keeps its original condition; patch notes get their own waiter.
+        var submenuWait = Normalize(AgentSourceFixture.MethodBody(rawAction, "WaitForMainMenuSubmenuCloseAsync"));
+        Assert.Contains("!ReferenceEquals(currentScreen, submenu) || !submenuStack.SubmenusOpen", submenuWait, StringComparison.Ordinal);
+        Assert.False(
+            submenuWait.Contains("NPatchNotesScreen", StringComparison.Ordinal),
+            "The patch-notes condition must not be folded into the submenu wait.");
+
+        var patchNotesWait = Normalize(AgentSourceFixture.MethodBody(rawAction, "IsPatchNotesClosed"));
+        Assert.Contains("!patchNotes.IsVisibleInTree()", patchNotesWait, StringComparison.Ordinal);
+        Assert.Contains("!ReferenceEquals(ActiveScreenContext.Instance.GetCurrentScreen(), patchNotes)", patchNotesWait, StringComparison.Ordinal);
+    }
+
+    public static void InspectOverlaysCloseThroughTheirOwnClose()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var canClose = Normalize(AgentSourceFixture.MethodBody(rawState, "CanCloseCardsView"));
+        Assert.Contains("currentScreen is NInspectCardScreen inspectCard", canClose, StringComparison.Ordinal);
+        Assert.Contains("currentScreen is NInspectRelicScreen inspectRelic", canClose, StringComparison.Ordinal);
+        Assert.Contains("return GetCardsViewBackButton(currentScreen) != null;", canClose, StringComparison.Ordinal);
+
+        var rawAction = AgentSourceFixture.ReadActionService();
+        var close = Normalize(AgentSourceFixture.MethodBody(rawAction, "ExecuteCloseCardsViewAsync"));
+        Assert.Contains("inspectCard.Close();", close, StringComparison.Ordinal);
+        Assert.Contains("inspectRelic.Close();", close, StringComparison.Ordinal);
+        Assert.Contains("GameStateService.GetCardsViewBackButton(currentScreen)", close, StringComparison.Ordinal);
+        Assert.Contains("WaitForCardsViewCloseAsync(currentScreen, TimeSpan.FromSeconds(10))", close, StringComparison.Ordinal);
+
+        var closed = Normalize(AgentSourceFixture.MethodBody(rawAction, "IsCardsViewClosed"));
+        Assert.Contains("closedScreen is NInspectCardScreen or NInspectRelicScreen", closed, StringComparison.Ordinal);
+        Assert.Contains("!ReferenceEquals(currentScreen, closedScreen)", closed, StringComparison.Ordinal);
+        Assert.Contains("return currentScreen is not NCardsViewScreen;", closed, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The game-over screen is named before the combat room can claim it.
+    /// </summary>
+    /// <remarks>
+    /// Death leaves the combat room active, so <c>FindActiveCombatRoom</c> still answers on the
+    /// game-over screen and the switch arm below it was unreachable. A live pass on 2026-09-17
+    /// caught eight samples whose only offered action was <c>continue_game_over</c> -- unambiguously
+    /// the end of a run -- and all eight reported <c>COMBAT</c>; across 2,346 samples not one ever
+    /// reported <c>GAME_OVER</c>. The name is documented in <c>docs/api.md</c>, the play skill routes
+    /// on it and <c>run_sts2_validation.py</c> branches on it, so an agent following the contract
+    /// waited for a screen it would never see and only recovered through the action list.
+    ///
+    /// Offline tests could not have found this: the ordering is only wrong when the two conditions
+    /// overlap, which needs a real death in a real fight.
+    /// </remarks>
+    public static void GameOverIsNamedBeforeTheCombatRoomClaimsIt()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var resolveBody = Flat(AgentSourceFixture.MethodBody(rawState, "ResolveNonModalScreen"));
+
+        const string gameOverGuard = "if(currentScreenisNGameOverScreen)";
+        var gameOverIndex = resolveBody.IndexOf(gameOverGuard, StringComparison.Ordinal);
+        var combatIndex = resolveBody.IndexOf("FindActiveCombatRoom(currentScreen)", StringComparison.Ordinal);
+
+        Assert.True(
+            gameOverIndex >= 0,
+            "ResolveNonModalScreen must claim NGameOverScreen with its own guard. The switch arm alone "
+            + "is unreachable, because the combat room is still active when a run ends.");
+        Assert.True(combatIndex >= 0, "The combat branch must remain covered by this contract.");
+        Assert.True(
+            gameOverIndex < combatIndex,
+            "NGameOverScreen must resolve before FindActiveCombatRoom can report COMBAT. Live evidence: "
+            + "with the guard after it, every game-over sample reported COMBAT instead.");
+
+        // The guard answers GAME_OVER and nothing else.
+        var guardSlice = resolveBody[gameOverIndex..combatIndex];
+        Assert.Contains("return\"GAME_OVER\";", guardSlice, StringComparison.Ordinal);
+    }
+
+    public static void CapstoneContainerPagesAreNamedAndNotDecisionScreens()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var resolveBody = Flat(AgentSourceFixture.MethodBody(rawState, "ResolveNonModalScreen"));
+
+        // The container keeps its own Type while a page is pushed on top of the one that opened it, so the
+        // page on its stack is what has to be named. Naming the container instead reported the run
+        // underneath (COMBAT while a person browses the card library), so the branch has to come first.
+        const string containerGuard = "if(currentScreenisNCapstoneSubmenuStackcontainer)";
+        var containerIndex = resolveBody.IndexOf(containerGuard, StringComparison.Ordinal);
+        var combatIndex = resolveBody.IndexOf("FindActiveCombatRoom(currentScreen)", StringComparison.Ordinal);
+        var visibleGridIndex = resolveBody.IndexOf(
+            "GetVisibleGridCardHolders(rootNode).Count>0", StringComparison.Ordinal);
+
+        Assert.True(containerIndex >= 0, "ResolveNonModalScreen must name the page the container shows.");
+        Assert.True(combatIndex >= 0, "The combat branch must remain covered by this contract.");
+        Assert.True(visibleGridIndex >= 0, "The visible card-grid fallback must remain covered by this contract.");
+        Assert.True(containerIndex < combatIndex, "The container page must resolve before FindActiveCombatRoom can report COMBAT.");
+        Assert.True(containerIndex < visibleGridIndex, "The container page must resolve before the visible grid can report CARD_SELECTION.");
+
+        // Every page the container shows gets its own name, and the ones a person reaches from the pause
+        // menu are the pages this test pins. Anything unknown stays on the historical CAPSTONE_SELECTION.
+        var pageSlice = resolveBody[containerIndex..combatIndex];
+        var containerPages = new[]
+        {
+            ("NPauseMenu", "PAUSE_MENU"),
+            ("NSettingsScreen", "SETTINGS"),
+            ("NCompendiumSubmenu", "COMPENDIUM"),
+            ("NCardLibrary", "CARD_LIBRARY"),
+            ("NRelicCollection", "RELIC_COLLECTION"),
+            ("NPotionLab", "POTION_LAB"),
+            ("NBestiary", "BESTIARY"),
+            ("NStatsScreen", "STATS"),
+            ("NRunHistory", "RUN_HISTORY"),
+        };
+        foreach (var (pageType, screenName) in containerPages)
+        {
+            Assert.Contains(pageType + "=>\"" + screenName + "\"", pageSlice, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("_=>\"CAPSTONE_SELECTION\"", pageSlice, StringComparison.Ordinal);
+        Assert.Contains("Stack?.Peek()", pageSlice, StringComparison.Ordinal);
+        Assert.Contains(
+            "NCapstoneSubmenuStack=>\"CAPSTONE_SELECTION\"",
+            resolveBody,
+            StringComparison.Ordinal);
+
+        // Every page in the container is a menu, so none of their buttons is a capstone option list.
+        var capstoneButtons = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "public static IReadOnlyList<NButton> GetCapstoneButtons("));
+        Assert.Contains(
+            "IsKnownCapstoneContainerPage(capstoneScreen.Stack?.Peek())",
+            capstoneButtons,
+            StringComparison.Ordinal);
+
+        // The overlay test has to prove the page on top of the stack, or a page would be reported as a
+        // frozen run the agent cannot act in.
+        var overlay = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "public static bool IsCapstonePageOverlay("));
+        Assert.Contains("IsKnownCapstoneContainerPage(container.Stack?.Peek())", overlay, StringComparison.Ordinal);
+
+        var knownPages = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "private static bool IsKnownCapstoneContainerPage("));
+        Assert.Contains("pageisNPauseMenu", knownPages, StringComparison.Ordinal);
+        // The predicate has to know every page the mapping names, or one of them would be reported as a
+        // frozen run whose own buttons read as capstone options.
+        foreach (var (pageType, _) in containerPages)
+        {
+            Assert.Contains(pageType, knownPages, StringComparison.Ordinal);
+        }
+
+        var walker = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "private static List<ActionDescriptor> EnumerateAvailableActions("));
+        const string actionGuard = "if(IsCapstonePageOverlay(currentScreen))";
+        Assert.Contains(actionGuard, walker, StringComparison.Ordinal);
+
+        // The branch returns ahead of the combat actions, so nothing is advertised while a menu is up.
+        var guardIndex = walker.IndexOf(actionGuard, StringComparison.Ordinal);
+        var endTurnIndex = walker.IndexOf(
+            "if(CanEndTurn(currentScreen,combatState,requireButtonReady:false,combatActionGate:combatActionGate))",
+            StringComparison.Ordinal);
+        Assert.True(
+            endTurnIndex >= 0 && guardIndex >= 0 && guardIndex < endTurnIndex,
+            "The container-page branch must return before the combat actions are advertised.");
+    }
+
+    private static (string ScreenType, string ScreenName)[] SwitchMappings(string methodBody)
+    {
+        var normalized = Normalize(methodBody);
+        var start = normalized.IndexOf("return currentScreen switch", StringComparison.Ordinal);
+        Assert.True(start >= 0, "ResolveNonModalScreen must keep its screen switch expression.");
+
+        var end = normalized.IndexOf("};", start, StringComparison.Ordinal);
+        var slice = end > start ? normalized[start..(end + 2)] : normalized[start..];
+
+        return Regex.Matches(slice, "([A-Za-z_][A-Za-z0-9_]*(?: or [A-Za-z_][A-Za-z0-9_]*)*)\\s*=>\\s*\"([A-Z_]+)\"")
+            .Select(match => (ScreenType: match.Groups[1].Value, ScreenName: match.Groups[2].Value))
+            .ToArray();
+    }
+
+    public static void CapstonePagesOfferOneBackStepAndNeverThePausePage()
+    {
+        var rawState = AgentSourceFixture.ReadStateService();
+        var rawAction = AgentSourceFixture.ReadActionService();
+
+        // The one action these pages have is backing out one level, and only from above the pause menu:
+        // the pause page is where a person resumes the run, so it is never the agent's to close.
+        var closable = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "public static NSubmenu? GetClosableCapstonePage("));
+        Assert.Contains("currentScreenisnotNCapstoneSubmenuStackcontainer", closable, StringComparison.Ordinal);
+        Assert.Contains("IsKnownCapstoneContainerPage(page)", closable, StringComparison.Ordinal);
+        Assert.Contains("pageisNPauseMenu", closable, StringComparison.Ordinal);
+        Assert.Contains("returnpage;", closable, StringComparison.Ordinal);
+
+        // The container is not an NSubmenu, so the widened check has to run before that branch.
+        var canClose = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "public static bool CanCloseMainMenuSubmenu("));
+        var closableIndex = canClose.IndexOf("GetClosableCapstonePage(currentScreen)!=null", StringComparison.Ordinal);
+        var submenuIndex = canClose.IndexOf("currentScreenisnotNSubmenusubmenu", StringComparison.Ordinal);
+        Assert.True(closableIndex >= 0, "close_main_menu_submenu must accept a capstone container page.");
+        Assert.True(submenuIndex >= 0, "The main-menu submenu branch must stay covered by this contract.");
+        Assert.True(closableIndex < submenuIndex, "The container branch has to run before the NSubmenu branch.");
+
+        // The executor pops the container's stack -- the call the game wires to every page's BackButton.
+        var close = Flat(AgentSourceFixture.DeclarationBody(
+            rawAction,
+            "private static async Task<ActionResponsePayload> ExecuteCloseMainMenuSubmenuAsync("));
+        Assert.Contains("currentScreenisNCapstoneSubmenuStackcapstonePageContainer", close, StringComparison.Ordinal);
+        Assert.Contains("GameStateService.GetClosableCapstonePage(capstonePageContainer)", close, StringComparison.Ordinal);
+        Assert.Contains("capstoneStack.Pop();", close, StringComparison.Ordinal);
+        Assert.Contains(
+            "WaitForCapstonePageCloseAsync(capstoneStack,capstonePage,TimeSpan.FromSeconds(10))",
+            close,
+            StringComparison.Ordinal);
+
+        // It has to be advertised from inside the guard that suppresses the run actions, or the action
+        // would only be reachable by a client that ignores available_actions. One walk feeds both
+        // surfaces, so this is pinned once.
+        var walker = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "private static List<ActionDescriptor> EnumerateAvailableActions("));
+        Assert.Contains(
+            "if(CanCloseMainMenuSubmenu(currentScreen)){descriptors.Add(newActionDescriptor{name=\"close_main_menu_submenu\","
+            + "requires_target=false,requires_index=false});}",
+            walker,
+            StringComparison.Ordinal);
+
+        // "Closed" is the stack no longer holding that page: the container screen itself never changes, so
+        // the main-menu waiter (which asks whether the screen changed) cannot be reused here.
+        var closed = Flat(AgentSourceFixture.DeclarationBody(
+            rawAction,
+            "private static bool IsCapstonePageClosed("));
+        Assert.Contains("!ReferenceEquals(stack.Peek(),page)", closed, StringComparison.Ordinal);
+        Assert.False(
+            closed.Contains("SubmenusOpen", StringComparison.Ordinal),
+            "The container stays open while a page below it is still there, so SubmenusOpen cannot tell a pop apart.");
+
+        // save_and_quit used to execute from a page whose surface never advertised it.
+        var canSave = Flat(AgentSourceFixture.DeclarationBody(
+            rawState,
+            "public static bool CanSaveAndQuit("));
+        var guardIndex = canSave.IndexOf("if(IsCapstonePageOverlay(currentScreen)){returnfalse;}", StringComparison.Ordinal);
+        var permissiveIndex = canSave.IndexOf("returncurrentScreenisnot(NMainMenuor", StringComparison.Ordinal);
+        Assert.True(guardIndex >= 0, "save_and_quit must refuse while a capstone page is up.");
+        Assert.True(permissiveIndex > guardIndex, "The capstone guard has to run before the permissive return.");
+    }
+
+    private static string Normalize(string source)
+    {
+        return Regex.Replace(source, "\\s+", " ");
+    }
+
+    private static string Flat(string source) => AgentSourceFixture.WithoutWhitespace(source);
+}

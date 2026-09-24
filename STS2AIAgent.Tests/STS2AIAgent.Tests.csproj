@@ -1,0 +1,103 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>STS2AIAgent.Tests</RootNamespace>
+    <AssemblyName>STS2AIAgent.Tests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\STS2AIAgent\Agent\AutoPlaySession.cs" Link="Agent\AutoPlaySession.cs" />
+    <Compile Include="..\STS2AIAgent\Game\ReflectedMemberResolver.cs" Link="Game\ReflectedMemberResolver.cs" />
+    <Compile Include="..\STS2AIAgent\Game\StateBuildTiming.cs" Link="Game\StateBuildTiming.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\AutoPlayRecovery.cs" Link="Agent\AutoPlayRecovery.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\CurrentRunBoundary.cs" Link="Agent\CurrentRunBoundary.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\StopKindPolicy.cs" Link="Agent\StopKindPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\DualLaunchOutcome.cs" Link="Agent\DualLaunchOutcome.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\AgentErrorEnvelope.cs" Link="Agent\AgentErrorEnvelope.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\NoProgressPolicy.cs" Link="Agent\NoProgressPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\SessionBudgetGuard.cs" Link="Agent\SessionBudgetGuard.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\PlayerFacingSession.cs" Link="Agent\PlayerFacingSession.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\DiagnosticExport.cs" Link="Agent\DiagnosticExport.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\DecisionLog.cs" Link="Agent\DecisionLog.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\DecisionContext.cs" Link="Agent\DecisionContext.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\StateViews.cs" Link="Agent\StateViews.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\PlaybookSections.cs" Link="Agent\PlaybookSections.cs" />
+    <Compile Include="..\STS2AIAgent\Server\LoopbackListener.cs" Link="Server\LoopbackListener.cs" />
+    <Compile Include="..\STS2AIAgent\Server\CompanionPortFile.cs" Link="Server\CompanionPortFile.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CompanionHealth.cs" Link="Multiplayer\CompanionHealth.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CompanionActPolicy.cs" Link="Multiplayer\CompanionActPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CompanionPlayPolicy.cs" Link="Multiplayer\CompanionPlayPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CompanionProfileBootstrap.cs" Link="Multiplayer\CompanionProfileBootstrap.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CoopLaunchPolicy.cs" Link="Multiplayer\CoopLaunchPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CoopSavePrecheckPolicy.cs" Link="Multiplayer\CoopSavePrecheckPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\TeamConversation.cs" Link="Multiplayer\TeamConversation.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\TeamIntent.cs" Link="Multiplayer\TeamIntent.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\TeammateStatus.cs" Link="Multiplayer\TeammateStatus.cs" />
+    <Compile Include="..\STS2AIAgent\Multiplayer\CompanionConnection.cs" Link="Multiplayer\CompanionConnection.cs" />
+    <Compile Include="..\STS2AIAgent\Config\*.cs" Link="Config\%(Filename)%(Extension)" />
+    <Compile Include="..\STS2AIAgent\Llm\*.cs" Link="Llm\%(Filename)%(Extension)" />
+    <Compile Include="..\STS2AIAgent\Agent\AgentLoop.cs" Link="Agent\AgentLoop.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\AgentTools.cs" Link="Agent\AgentTools.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\ActIndexValidator.cs" Link="Agent\ActIndexValidator.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\ActJsonParser.cs" Link="Agent\ActJsonParser.cs" />
+   <Compile Include="..\STS2AIAgent\Agent\PlayIntent.cs" Link="Agent\PlayIntent.cs" />
+    <Compile Include="..\STS2AIAgent\Localization\Loc.cs" Link="Localization\Loc.cs" />
+    <Compile Include="..\STS2AIAgent\Localization\Loc.Strings.*.cs" Link="Localization\%(Filename)%(Extension)" />
+    <Compile Include="..\STS2AIAgent\Ui\OverlayTabCatalog.cs" Link="Ui\OverlayTabCatalog.cs" />
+    <Compile Include="..\STS2AIAgent\Ui\DecisionLogView.cs" Link="Ui\DecisionLogView.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\GameDataFilter.cs" Link="Agent\GameDataFilter.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\IGameBridge.cs" Link="Agent\IGameBridge.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\PlayPrompt.cs" Link="Agent\PlayPrompt.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\ProactiveChatPolicy.cs" Link="Agent\ProactiveChatPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\McpProcessLauncher.cs" Link="Agent\McpProcessLauncher.cs" />
+    <!--
+      A glob, not one file: NativeMcpServer is a partial class (transport in the base file, tool
+      execution in NativeMcpServer.Tools.cs). Naming the base file alone compiled the class without
+      its tools, and the failure arrived as "ReadString does not exist" rather than as a missing
+      include. A new partial is picked up here without a second edit.
+    -->
+    <Compile Include="..\STS2AIAgent\Server\NativeMcpServer*.cs" Link="Server\%(Filename)%(Extension)" />
+    <Compile Include="..\STS2AIAgent\Game\ReflectionMemberAccessor.cs" Link="Game\ReflectionMemberAccessor.cs" />
+    <Compile Include="..\STS2AIAgent\Game\UnlockConfirmResolutionPolicy.cs" Link="Game\UnlockConfirmResolutionPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\FtueModalPolicy.cs" Link="Game\FtueModalPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\CrystalSphereSettlePolicy.cs" Link="Game\CrystalSphereSettlePolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\RewardChoicePolicy.cs" Link="Game\RewardChoicePolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\RewardPotionPolicy.cs" Link="Game\RewardPotionPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\RewardSkipScope.cs" Link="Game\RewardSkipScope.cs" />
+    <Compile Include="..\STS2AIAgent\Game\MenuTransitionPolicy.cs" Link="Game\MenuTransitionPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\BackgroundTaskOutcome.cs" Link="Game\BackgroundTaskOutcome.cs" />
+    <Compile Include="..\STS2AIAgent\Game\CardPlayCounterPolicy.cs" Link="Game\CardPlayCounterPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\GameTaskWaitPolicy.cs" Link="Game\GameTaskWaitPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\CombatTurnReadinessPolicy.cs" Link="Game\CombatTurnReadinessPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Game\ProgressSaveVerification.cs" Link="Game\ProgressSaveVerification.cs" />
+    <Compile Include="..\STS2AIAgent\Game\EventOptionLocalization.cs" Link="Game\EventOptionLocalization.cs" />
+    <Compile Include="..\STS2AIAgent\Agent\GameDataExportSchema.cs" Link="Agent\GameDataExportSchema.cs" />
+    <Compile Include="..\STS2AIAgent\Server\ApiException.cs" Link="Server\ApiException.cs" />
+    <Compile Include="..\STS2AIAgent\Server\JsonHelper.cs" Link="Server\JsonHelper.cs" />
+    <Compile Include="..\STS2AIAgent\Server\HealthRoleData.cs" Link="Server\HealthRoleData.cs" />
+    <Compile Include="..\STS2AIAgent\Server\EventPollingCoordinator.cs" Link="Server\EventPollingCoordinator.cs" />
+    <Compile Include="..\STS2AIAgent\Server\GameEventSubscriberHub.cs" Link="Server\GameEventSubscriberHub.cs" />
+    <Compile Include="..\STS2AIAgent\Server\ConsecutiveRepeatSuppressor.cs" Link="Server\ConsecutiveRepeatSuppressor.cs" />
+    <Compile Include="..\STS2AIAgent\Server\EventChurnPolicy.cs" Link="Server\EventChurnPolicy.cs" />
+    <Compile Include="..\STS2AIAgent\Server\EventStreamSubscribers.cs" Link="Server\EventStreamSubscribers.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../skills/sts2-mcp-player/SKILL.md" LogicalName="STS2AIAgent.Sts2McpPlayer.Skill.md" />
+    <EmbeddedResource Include="../skills/sts2-mcp-player/references/screen-playbooks.md" LogicalName="STS2AIAgent.Sts2McpPlayer.ScreenPlaybooks.md" />
+    <EmbeddedResource Include="../skills/sts2-mcp-player/references/strategy.md" LogicalName="STS2AIAgent.Sts2McpPlayer.Strategy.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Roslyn ships inside the .NET SDK, so the source-coverage tests can parse the mod files the
+      test project cannot compile (they reference the game assemblies). No NuGet package is added.
+    -->
+    <Reference Include="Microsoft.CodeAnalysis">
+      <HintPath>$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp">
+      <HintPath>$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

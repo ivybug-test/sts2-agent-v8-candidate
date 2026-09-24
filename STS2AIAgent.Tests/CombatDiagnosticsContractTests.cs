@@ -1,0 +1,149 @@
+namespace STS2AIAgent.Tests;
+
+/// <summary>
+/// Source contracts for diagnostics that require the live Godot combat runtime.
+/// The lightweight test project cannot instantiate CardModel or the action queue,
+/// so it verifies that both raw state and agent view retain the required evidence.
+/// </summary>
+internal static class CombatDiagnosticsContractTests
+{
+    public static void HandPayloadKeepsNativeCanPlayEvidence()
+    {
+        var rawStateSource = AgentSourceFixture.ReadStateService();
+        var handBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildHandCardPayload"));
+        var agentHandBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildAgentHandCardPayload"));
+
+        Assert.Contains(
+            "varcanPlay=card.CanPlay(outvarreason,outvarpreventer)",
+            handBody,
+            StringComparison.Ordinal);
+        Assert.Contains("playable=targetSupported&&canPlay", handBody, StringComparison.Ordinal);
+        Assert.Contains("can_play_result=canPlay", handBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_reason_raw=", handBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_preventer_id=GetModelIdEntry(preventer)", handBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_preventer_type=preventer?.GetType().FullName", handBody, StringComparison.Ordinal);
+
+        Assert.Contains("unplayable_reason=card.unplayable_reason", agentHandBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_reason_raw=card.unplayable_reason_raw", agentHandBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_preventer_id=card.unplayable_preventer_id", agentHandBody, StringComparison.Ordinal);
+        Assert.Contains("unplayable_preventer_type=card.unplayable_preventer_type", agentHandBody, StringComparison.Ordinal);
+    }
+
+    public static void CombatPayloadDistinguishesQueueModalAndSnapshotLocks()
+    {
+        var rawStateSource = AgentSourceFixture.ReadStateService();
+        var stateSource = WithoutWhitespace(rawStateSource);
+        var combatBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildCombatPayload"));
+        var agentCombatBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildAgentCombatPayload"));
+
+        Assert.Contains("GetOpenModal()", stateSource, StringComparison.Ordinal);
+        // The gate reads the queue only inside a fight, and both members are null-guarded there, so the
+        // payload cannot fail on the main menu (where RunManager has no executor at all).
+        Assert.Contains("ActionExecutor?.CurrentlyRunningAction", stateSource, StringComparison.Ordinal);
+        Assert.Contains("ActionQueueSet?.GetReadyAction()", stateSource, StringComparison.Ordinal);
+        Assert.Contains("\"modal_open\"", stateSource, StringComparison.Ordinal);
+        Assert.Contains("\"game_action_running\"", stateSource, StringComparison.Ordinal);
+        Assert.Contains("\"game_action_queued\"", stateSource, StringComparison.Ordinal);
+        Assert.Contains("\"snapshot_stabilizing\"", stateSource, StringComparison.Ordinal);
+        // Both flags are sampled once inside the gate and then projected, so the payload cannot
+        // report a hand lock from one read and a ready snapshot from another.
+        Assert.Contains("HandInCardPlay=hand?.InCardPlay", stateSource, StringComparison.Ordinal);
+        Assert.Contains("HandInCardSelection=hand?.IsInCardSelection", stateSource, StringComparison.Ordinal);
+        Assert.Contains("hand_in_card_play=gate.HandInCardPlay", stateSource, StringComparison.Ordinal);
+        Assert.Contains("hand_in_card_selection=gate.HandInCardSelection", stateSource, StringComparison.Ordinal);
+        Assert.Contains("action_readiness=BuildCombatActionReadinessPayload", combatBody, StringComparison.Ordinal);
+        Assert.Contains("action_readiness=combat.action_readiness", agentCombatBody, StringComparison.Ordinal);
+    }
+
+    public static void PlayCardTimeoutCancelsNativeGameAction()
+    {
+        var actionSource = AgentSourceFixture.ReadActionService();
+        var cancelBody = WithoutWhitespace(MethodBody(actionSource, "TryCancelRunningPlayerAction"));
+        var playCardBody = WithoutWhitespace(MethodBody(actionSource, "ExecutePlayCardAsync"));
+        var bridgeSource = WithoutWhitespace(ReadSource("STS2AIAgent/Agent/GameBridge.cs"));
+
+        Assert.Contains("running.Cancel()", cancelBody, StringComparison.Ordinal);
+        Assert.Contains("executor.Cancel()", cancelBody, StringComparison.Ordinal);
+        Assert.Contains("GameActionState.GatheringPlayerChoice", cancelBody, StringComparison.Ordinal);
+        Assert.Contains("TryCancelRunningPlayerAction()", playCardBody, StringComparison.Ordinal);
+        Assert.Contains("TimeSpan.FromSeconds(12)", playCardBody, StringComparison.Ordinal);
+        Assert.Contains("GameActionService.TryCancelRunningPlayerAction()", bridgeSource, StringComparison.Ordinal);
+    }
+
+    public static void CombatPayloadExposesOwnPets()
+    {
+        var rawStateSource = AgentSourceFixture.ReadStateService();
+        var combatBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildCombatPayload"));
+        var agentCombatBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildAgentCombatPayload"));
+        var petBody = WithoutWhitespace(MethodBody(rawStateSource, "BuildCombatPetPayload"));
+        var spawnsBody = WithoutWhitespace(MethodBody(rawStateSource, "PlayerSpawnsPets"));
+
+        // A pet fights on the player's own side, so it never reaches the enemies list. Without these
+        // fields the raw payload said nothing at all about Necrobinder's Osty: its health and whether
+        // it was still alive were invisible to the agent.
+        Assert.Contains(
+            "pets=me.PlayerCombatState.Pets.Select(BuildCombatPetPayload).ToArray()",
+            combatBody,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "pet_missing=PlayerSpawnsPets(me)&&me.PlayerCombatState.Pets.Count==0",
+            combatBody,
+            StringComparison.Ordinal);
+        // A dead pet leaves the list, so the list alone cannot say "it died" versus "never had one".
+        Assert.Contains("relic.SpawnsPets", spawnsBody, StringComparison.Ordinal);
+        Assert.Contains("current_hp=pet.CurrentHp", petBody, StringComparison.Ordinal);
+        Assert.Contains("max_hp=pet.MaxHp", petBody, StringComparison.Ordinal);
+        Assert.Contains("block=pet.Block", petBody, StringComparison.Ordinal);
+        Assert.Contains("powers=BuildCreaturePowerPayloads(pet)", petBody, StringComparison.Ordinal);
+        Assert.Contains(
+            "pets=combat.player.pets.Select(pet=>FormatPetLine(pet)).ToArray()",
+            agentCombatBody,
+            StringComparison.Ordinal);
+        Assert.Contains("pet_missing=combat.player.pet_missing", agentCombatBody, StringComparison.Ordinal);
+    }
+
+    private static string ReadSource(string relativePath)
+    {
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            for (var directory = new DirectoryInfo(start); directory != null; directory = directory.Parent)
+            {
+                var candidate = Path.Combine(directory.FullName, relativePath);
+                if (File.Exists(candidate))
+                {
+                    return File.ReadAllText(candidate);
+                }
+            }
+        }
+
+        throw new FileNotFoundException($"Could not locate source file: {relativePath}");
+    }
+
+    private static string WithoutWhitespace(string value) =>
+        string.Concat(value.Where(character => !char.IsWhiteSpace(character)));
+
+    private static string MethodBody(string source, string methodName)
+    {
+        var nameIndex = source.LastIndexOf($" {methodName}(", StringComparison.Ordinal);
+        var openBrace = nameIndex < 0 ? -1 : source.IndexOf('{', nameIndex);
+        if (openBrace < 0)
+        {
+            throw new InvalidOperationException($"Method body is missing: {methodName}");
+        }
+
+        var depth = 0;
+        for (var index = openBrace; index < source.Length; index++)
+        {
+            if (source[index] == '{')
+            {
+                depth++;
+            }
+            else if (source[index] == '}' && --depth == 0)
+            {
+                return source[openBrace..(index + 1)];
+            }
+        }
+
+        throw new InvalidOperationException($"Method body is unterminated: {methodName}");
+    }
+}

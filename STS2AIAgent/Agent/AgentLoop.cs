@@ -1,0 +1,802 @@
+using System.Text.Json;
+using STS2AIAgent.Config;
+using STS2AIAgent.Llm;
+
+namespace STS2AIAgent.Agent;
+
+internal sealed class AgentLoop
+{
+    private const int MaxToolRounds = 8;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = null,
+        WriteIndented = false
+    };
+
+    private readonly IGameBridge _bridge;
+    private readonly ILlmClientFactory _factory;
+    private readonly Func<AgentSettings> _settings;
+    private readonly Func<string?>? _teamContext;
+    private readonly Func<SessionBudgetGuard?>? _budgetGuard;
+
+    public AgentLoop(
+        IGameBridge bridge,
+        ILlmClientFactory factory,
+        Func<AgentSettings> settings,
+        Func<string?>? teamContext = null,
+        Func<SessionBudgetGuard?>? budgetGuard = null)
+    {
+        _bridge = bridge;
+        _factory = factory;
+        _settings = settings;
+        _teamContext = teamContext;
+        _budgetGuard = budgetGuard;
+    }
+
+    public async Task<AgentTurnResult> ChatAsync(
+        string userText,
+        IReadOnlyList<ChatTurn> history,
+        ChatOptions options,
+        CancellationToken cancellationToken)
+    {
+        var settings = _settings();
+        var resolved = options.TeammateConversation ? settings.ResolvePlayModel() : settings.ResolveConversationModel();
+        var system = options.TeammateConversation ? PlayPrompt.TeammateChatSystem : PlayPrompt.ChatSystem;
+        if (!string.IsNullOrWhiteSpace(options.ExtraSystemInstruction))
+        {
+            system += Environment.NewLine + options.ExtraSystemInstruction.Trim();
+        }
+
+        var messages = new List<LlmMessage>
+        {
+            LlmMessage.System(system)
+        };
+
+        foreach (var turn in history.TakeLast(12))
+        {
+            messages.Add(new LlmMessage { Role = turn.Role, Content = turn.Text });
+        }
+
+        if (options.AttachState)
+        {
+            messages.Add(LlmMessage.User("Current compact game state:\n" + await _bridge.GetCompactStateJsonAsync(cancellationToken)));
+        }
+
+        byte[]? screenshot = null;
+        var visionNote = await TryDescribeOrAttachVisionAsync(
+            resolved,
+            settings,
+            options.AttachScreenshot,
+            cancellationToken);
+        if (visionNote.Caption != null)
+        {
+            messages.Add(LlmMessage.User(visionNote.Caption));
+        }
+
+        screenshot = visionNote.AttachToPrimary ? visionNote.Jpeg : null;
+        messages.Add(LlmMessage.User(userText, screenshot));
+
+        var allowAct = !options.TeammateConversation &&
+            !options.ReadOnly &&
+            (options.AllowAct || PlayIntent.Detect(userText));
+        AppendJsonActFallbackIfNeeded(messages, resolved, allowAct);
+        var tools = allowAct ? AgentTools.Play : AgentTools.ReadOnly;
+        return await CompleteWithToolsAsync(
+            resolved,
+            messages,
+            tools,
+            allowAct,
+            stopAfterAct: false,
+            cancellationToken,
+            initialUsage: visionNote.Usage,
+            initialRequests: visionNote.RequestsSpent);
+    }
+
+    public async Task<AgentTurnResult> PlayOnceAsync(CancellationToken cancellationToken, Action<string>? checkState = null)
+    {
+        if (checkState != null) checkState(await _bridge.GetCompactStateJsonAsync(cancellationToken));
+        var settings = _settings();
+        var resolved = settings.ResolvePlayModel();
+        var actionable = await _bridge.WaitUntilActionableAsync(TimeSpan.FromSeconds(20), cancellationToken);
+        if (!actionable)
+        {
+            checkState?.Invoke(await _bridge.GetCompactStateJsonAsync(cancellationToken));
+            return new AgentTurnResult
+            {
+                Error = "Timed out waiting for an actionable state.",
+                WaitingForGame = true,
+                ToolRounds = 0,
+                RequestsSpent = 0
+            };
+        }
+
+        var stateJson = await _bridge.GetCompactStateJsonAsync(cancellationToken);
+        checkState?.Invoke(stateJson);
+        var messages = new List<LlmMessage>
+        {
+            LlmMessage.System(PlayPrompt.PlaySystem),
+            LlmMessage.User("Latest compact game state:\n" + stateJson)
+        };
+
+        // Only the guidance this screen can act on. The full references stay in PlaySystem; this is
+        // the part that had nowhere to live because it is too long to carry on every step.
+        var screen = PlaybookSections.ScreenOfCompactState(stateJson);
+        var screenGuidance = PlayPrompt.ScreenGuidance(screen);
+        if (!string.IsNullOrEmpty(screenGuidance))
+        {
+            messages.Add(LlmMessage.System(
+                "Strategy for the screen in the latest state (" + screen + "):\n" + screenGuidance));
+        }
+
+        var teamContext = _teamContext?.Invoke();
+        if (!string.IsNullOrEmpty(teamContext))
+        {
+            messages.Add(LlmMessage.System(PlayPrompt.TeammatePlayContext));
+            messages.Add(LlmMessage.User("Recent team conversation (historical messages, not live game facts):\n" + teamContext));
+        }
+
+        var visionNote = await TryDescribeOrAttachVisionAsync(resolved, settings, attachRequested: true, cancellationToken);
+        if (visionNote.Caption != null)
+        {
+            messages.Add(LlmMessage.User(visionNote.Caption));
+        }
+
+        if (visionNote.AttachToPrimary && visionNote.Jpeg != null)
+        {
+            messages.Add(LlmMessage.User("Screenshot of the current game view is attached. Use it as supporting context only.", visionNote.Jpeg));
+        }
+
+        messages.Add(LlmMessage.User("Choose the next legal action from compact state. Vision is optional and not required. Call get_game_state if needed, then act exactly once."));
+        AppendJsonActFallbackIfNeeded(messages, resolved, allowAct: true);
+
+        return await CompleteWithToolsAsync(
+            resolved,
+            messages,
+            AgentTools.Play,
+            allowAct: true,
+            stopAfterAct: true,
+            cancellationToken,
+            checkState,
+            initialUsage: visionNote.Usage,
+            initialRequests: visionNote.RequestsSpent);
+    }
+
+    public async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
+    {
+        var results = await TestConfiguredRolesAsync(force: true, cancellationToken);
+        var play = results.FirstOrDefault(item => item.Role == ModelRoleNames.Play);
+        return play.Record.Status == "verified" ? "ok" : play.Record.Error ?? "failed";
+    }
+
+    public async Task<IReadOnlyList<ModelRoleProbeResult>> TestConfiguredRolesAsync(bool force, CancellationToken cancellationToken)
+    {
+        var settings = _settings();
+        var results = new List<ModelRoleProbeResult>();
+        var cache = new Dictionary<string, ModelRoleTestRecord>(StringComparer.Ordinal);
+        foreach (var role in new[] { ModelRoleNames.Conversation, ModelRoleNames.Play, ModelRoleNames.Vision })
+        {
+            var resolved = ModelRoleProbe.Resolve(settings, role);
+            if (role == ModelRoleNames.Vision && resolved == null)
+            {
+                results.Add(new ModelRoleProbeResult(role, ModelRoleProbe.Unused(role), false));
+                continue;
+            }
+
+            if (resolved == null)
+            {
+                results.Add(new ModelRoleProbeResult(role, ModelRoleProbe.Unverified(role, null), false));
+                continue;
+            }
+
+            var current = ModelRoleProbe.Current(settings, role);
+            var fingerprint = ModelRoleProbe.Fingerprint(resolved);
+            if (!force && current.Status == "verified" && current.Fingerprint == fingerprint)
+            {
+                results.Add(new ModelRoleProbeResult(role, current, true));
+                continue;
+            }
+
+            if (cache.TryGetValue(fingerprint, out var cached))
+            {
+                results.Add(new ModelRoleProbeResult(role, CopyForRole(cached, role), false));
+                continue;
+            }
+
+            try
+            {
+                var client = _factory.Create(resolved.Endpoint);
+                await client.PingAsync(resolved.Model.Model, cancellationToken);
+                var record = ModelRoleProbe.FromSuccess(role, resolved);
+                cache[fingerprint] = record;
+                results.Add(new ModelRoleProbeResult(role, record, false));
+            }
+            catch (Exception ex)
+            {
+                var record = ModelRoleProbe.FromException(role, resolved, ex);
+                cache[fingerprint] = record;
+                results.Add(new ModelRoleProbeResult(role, record, false));
+            }
+        }
+
+        return results;
+    }
+
+    private static ModelRoleTestRecord CopyForRole(ModelRoleTestRecord source, string role)
+    {
+        return new ModelRoleTestRecord
+        {
+            Role = role,
+            Status = source.Status,
+            CapabilityStatus = source.CapabilityStatus,
+            EndpointId = source.EndpointId,
+            EndpointName = source.EndpointName,
+            ModelId = source.ModelId,
+            ModelName = source.ModelName,
+            Fingerprint = source.Fingerprint,
+            StatusCode = source.StatusCode,
+            Error = source.Error,
+            NextStep = source.NextStep,
+            TestedAt = source.TestedAt
+        };
+    }
+
+    private async Task<AgentTurnResult> CompleteWithToolsAsync(
+        ResolvedModel resolved,
+        List<LlmMessage> messages,
+        IReadOnlyList<LlmTool> tools,
+        bool allowAct,
+        bool stopAfterAct,
+        CancellationToken cancellationToken,
+        Action<string>? checkState = null,
+        LlmUsage? initialUsage = null,
+        int initialRequests = 0)
+    {
+        var client = _factory.Create(resolved.Endpoint);
+        string? lastText = null;
+        string? lastReasoning = null;
+        string? acted = null;
+        string? actResult = null;
+        string? lastActError = null;
+        string? actFingerprint = null;
+        var actUnsettled = false;
+        var rounds = 0;
+        var accumulatedUsage = initialUsage;
+        var requestsSpent = initialRequests;
+
+        for (var round = 0; round < MaxToolRounds; round++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            rounds = round + 1;
+            var request = new LlmRequest
+            {
+                Model = resolved.Model.Model,
+                Messages = messages.ToArray(),
+                Tools = resolved.Model.SupportsTools ? tools : null,
+                Thinking = resolved.Model.GetThinkingIntensity(),
+                ThinkingMode = resolved.Model.ThinkingMode
+            };
+
+            var budgetReason = _budgetGuard?.Invoke()?.CheckBudget(requestsSpent);
+            if (budgetReason != null)
+            {
+                return new AgentTurnResult
+                {
+                    AssistantText = lastText,
+                    Reasoning = lastReasoning,
+                    Acted = acted,
+                    ActResultJson = actResult,
+                    Error = budgetReason,
+                    ToolRounds = rounds,
+                    Usage = accumulatedUsage,
+                    RequestsSpent = requestsSpent
+                };
+            }
+
+            LlmCompletion completion;
+            try
+            {
+                requestsSpent++;
+                completion = await client.CompleteAsync(request, cancellationToken);
+                if (completion.Usage != null)
+                {
+                    accumulatedUsage = LlmUsage.Combine(accumulatedUsage, completion.Usage);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return new AgentTurnResult
+                {
+                    AssistantText = lastText,
+                    Reasoning = lastReasoning,
+                    Acted = acted,
+                    ActResultJson = actResult,
+                    Error = ex.Message,
+                    RequiresConfiguration = ex is LlmException { StatusCode: >= 400 and < 500 and not 408 and not 429 },
+                    ToolRounds = rounds,
+                    Usage = accumulatedUsage,
+                    RequestsSpent = requestsSpent
+                };
+            }
+
+            lastText = completion.Content;
+            lastReasoning = completion.Reasoning ?? lastReasoning;
+            if (completion.ToolCalls.Count == 0)
+            {
+                if (allowAct &&
+                    acted == null &&
+                    !resolved.Model.SupportsTools &&
+                    ActJsonParser.TryParse(completion.Content, out var actJson))
+                {
+                    var fallbackReason = TryReadActReason(actJson);
+                    var parsedAct = await ExecuteActAsync(actJson, cancellationToken, checkState);
+                    if (parsedAct.Error == null)
+                    {
+                        lastReasoning = fallbackReason ?? lastReasoning;
+                        acted = parsedAct.Action;
+                        actResult = parsedAct.ResultJson;
+                        actFingerprint = parsedAct.Fingerprint;
+                        actUnsettled = parsedAct.Unsettled;
+                        lastActError = null;
+                        if (stopAfterAct)
+                        {
+                            return new AgentTurnResult
+                            {
+                                AssistantText = completion.Content,
+                                Reasoning = lastReasoning,
+                                Acted = acted,
+                                ActResultJson = actResult,
+                                StateFingerprint = actFingerprint,
+                                ExecutedUnsettled = actUnsettled,
+                                ToolRounds = rounds,
+                                Usage = accumulatedUsage,
+                                RequestsSpent = requestsSpent
+                            };
+                        }
+                    }
+                    else
+                    {
+                        lastActError = parsedAct.Error;
+                    }
+
+                    messages.Add(LlmMessage.Assistant(completion.Content));
+                    messages.Add(LlmMessage.User("Act result:\n" + parsedAct.ResultJson));
+                    continue;
+                }
+
+                return new AgentTurnResult
+                {
+                    AssistantText = completion.Content,
+                    Reasoning = lastReasoning,
+                    Acted = acted,
+                    ActResultJson = actResult,
+                    Error = acted == null ? lastActError : null,
+                    StateFingerprint = actFingerprint,
+                    ExecutedUnsettled = actUnsettled,
+                    ToolRounds = rounds,
+                    Usage = accumulatedUsage,
+                    RequestsSpent = requestsSpent
+                };
+            }
+
+            messages.Add(LlmMessage.Assistant(completion.Content, completion.ToolCalls));
+            foreach (var call in completion.ToolCalls)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (string.Equals(call.Name, "act", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!allowAct)
+                    {
+                        messages.Add(LlmMessage.Tool(call.Id, """{"error":"act is disabled in chat mode"}"""));
+                        continue;
+                    }
+
+                    if (acted != null)
+                    {
+                        messages.Add(LlmMessage.Tool(call.Id, """{"error":"only one act is allowed per decision"}"""));
+                        continue;
+                    }
+
+                    var actReason = TryReadActReason(call.ArgumentsJson);
+                    var actOutcome = await ExecuteActAsync(call.ArgumentsJson, cancellationToken, checkState);
+                    messages.Add(LlmMessage.Tool(call.Id, actOutcome.ResultJson));
+                    if (actOutcome.Error == null)
+                    {
+                        lastReasoning = actReason ?? lastReasoning;
+                        acted = actOutcome.Action;
+                        actResult = actOutcome.ResultJson;
+                        actFingerprint = actOutcome.Fingerprint;
+                        actUnsettled = actOutcome.Unsettled;
+                        lastActError = null;
+                        if (stopAfterAct)
+                        {
+                            return new AgentTurnResult
+                            {
+                                AssistantText = completion.Content,
+                                Reasoning = lastReasoning,
+                                Acted = acted,
+                                ActResultJson = actResult,
+                                StateFingerprint = actFingerprint,
+                                ExecutedUnsettled = actUnsettled,
+                                ToolRounds = rounds,
+                                Usage = accumulatedUsage,
+                                RequestsSpent = requestsSpent
+                            };
+                        }
+                    }
+                    else
+                    {
+                        lastActError = actOutcome.Error;
+                    }
+
+                    continue;
+                }
+
+                var toolJson = await ExecuteReadToolAsync(call.Name, call.ArgumentsJson, cancellationToken, checkState);
+                messages.Add(LlmMessage.Tool(call.Id, toolJson));
+            }
+        }
+
+        return new AgentTurnResult
+        {
+            AssistantText = lastText,
+            Reasoning = lastReasoning,
+            Acted = acted,
+            ActResultJson = actResult,
+            Error = acted == null && lastActError != null
+                ? lastActError
+                : "Reached the tool-call round limit without a final answer.",
+            StateFingerprint = actFingerprint,
+            ExecutedUnsettled = actUnsettled,
+            ToolRounds = rounds,
+            Usage = accumulatedUsage,
+            RequestsSpent = requestsSpent
+        };
+    }
+
+    private async Task<(string? Caption, byte[]? Jpeg, bool AttachToPrimary, LlmUsage? Usage, int RequestsSpent)> TryDescribeOrAttachVisionAsync(
+        ResolvedModel primary,
+        AgentSettings settings,
+        bool attachRequested,
+        CancellationToken cancellationToken)
+    {
+        if (!attachRequested)
+        {
+            return (null, null, false, null, 0);
+        }
+
+        var vision = settings.TryResolveVisionModel();
+        if (!primary.Model.SupportsVision && vision == null)
+        {
+            return (null, null, false, null, 0);
+        }
+
+        byte[]? jpeg;
+        try
+        {
+            jpeg = await _bridge.CaptureScreenshotJpegAsync(cancellationToken);
+        }
+        catch
+        {
+            jpeg = null;
+        }
+
+        if (jpeg == null || jpeg.Length == 0)
+        {
+            return (null, null, false, null, 0);
+        }
+
+        if (primary.Model.SupportsVision)
+        {
+            return (null, jpeg, true, null, 0);
+        }
+
+        if (vision == null)
+        {
+            return (null, null, false, null, 0);
+        }
+
+        var visionBudget = _budgetGuard?.Invoke()?.CheckBudget();
+        if (visionBudget != null)
+        {
+            return (visionBudget, jpeg, false, null, 0);
+        }
+
+        try
+        {
+            var client = _factory.Create(vision.Endpoint);
+            var completion = await client.CompleteAsync(new LlmRequest
+            {
+                Model = vision.Model.Model,
+                Messages = new[]
+                {
+                    LlmMessage.System("Describe this Slay the Spire 2 screenshot for a non-vision gameplay model. Focus on screen type, visible cards, enemies, rewards, and UI prompts. Be concise."),
+                    LlmMessage.User("Describe the current game view.", jpeg)
+                },
+                Thinking = vision.Model.GetThinkingIntensity(),
+                ThinkingMode = vision.Model.ThinkingMode
+            }, cancellationToken);
+
+            var caption = string.IsNullOrWhiteSpace(completion.Content)
+                ? "Vision model returned an empty description."
+                : "Vision observation:\n" + completion.Content;
+            return (caption, jpeg, false, completion.Usage, 1);
+        }
+        catch (Exception ex)
+        {
+            return ("Vision model failed: " + ex.Message, jpeg, false, null, 1);
+        }
+    }
+
+    private async Task<string> ExecuteReadToolAsync(
+        string name,
+        string argumentsJson,
+        CancellationToken cancellationToken,
+        Action<string>? checkState = null)
+    {
+        try
+        {
+            using var args = ParseArgs(argumentsJson);
+            return name switch
+            {
+                "get_game_state" => InvokeCheckState(await _bridge.GetCompactStateJsonAsync(cancellationToken), checkState),
+                "get_raw_game_state" => await _bridge.GetRawStateJsonAsync(cancellationToken),
+                "get_available_actions" => await _bridge.GetAvailableActionsJsonAsync(cancellationToken),
+                "wait_until_actionable" => await WaitUntilActionableJsonAsync(args, cancellationToken, checkState),
+                "get_game_data_item" => await _bridge.GetGameDataItemJsonAsync(
+                    ReadString(args, "collection") ?? string.Empty,
+                    ReadString(args, "item_id") ?? string.Empty,
+                    cancellationToken),
+                "get_game_data_items" => await _bridge.GetGameDataItemsJsonAsync(
+                    ReadString(args, "collection") ?? string.Empty,
+                    GameDataFilter.ParseItemIds(ReadString(args, "item_ids")),
+                    cancellationToken),
+                "get_relevant_game_data" => await _bridge.GetRelevantGameDataJsonAsync(
+                    ReadString(args, "collection") ?? string.Empty,
+                    GameDataFilter.ParseItemIds(ReadString(args, "item_ids")),
+                    cancellationToken),
+                _ => JsonSerializer.Serialize(new { error = $"Unknown tool '{name}'" }, JsonOptions)
+            };
+        }
+        catch (AutoPlayStoppedException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return AgentErrorEnvelope.Serialize(ex, JsonOptions);
+        }
+    }
+
+    private async Task<string> WaitUntilActionableJsonAsync(
+        JsonDocument args,
+        CancellationToken cancellationToken,
+        Action<string>? checkState = null)
+    {
+        var timeout = TimeSpan.FromSeconds(ReadTimeoutSeconds(args));
+        var actionable = await _bridge.WaitUntilActionableAsync(timeout, cancellationToken);
+        var stateJson = await _bridge.GetCompactStateJsonAsync(cancellationToken);
+        checkState?.Invoke(stateJson);
+        var actionsJson = await _bridge.GetAvailableActionsJsonAsync(cancellationToken);
+        return JsonSerializer.Serialize(new
+        {
+            actionable,
+            timeout_seconds = timeout.TotalSeconds,
+            state = JsonSerializer.Deserialize<JsonElement>(string.IsNullOrWhiteSpace(stateJson) ? "{}" : stateJson),
+            actions = JsonSerializer.Deserialize<JsonElement>(string.IsNullOrWhiteSpace(actionsJson) ? "[]" : actionsJson)
+        }, JsonOptions);
+    }
+
+    private async Task<(string? Action, string ResultJson, string? Fingerprint, bool Unsettled, string? Error)> ExecuteActAsync(
+        string argumentsJson,
+        CancellationToken cancellationToken,
+        Action<string>? checkState = null)
+    {
+        try
+        {
+            using var args = ParseArgs(argumentsJson);
+            var action = ReadString(args, "action")?.Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                return (null, """{"error":"action is required"}""", null, false, "action is required");
+            }
+
+            var legal = await _bridge.GetAvailableActionNamesAsync(cancellationToken);
+            if (!legal.Contains(action, StringComparer.OrdinalIgnoreCase))
+            {
+                var json = JsonSerializer.Serialize(new
+                {
+                    error = "Action is not in available_actions.",
+                    action,
+                    available_actions = legal
+                }, JsonOptions);
+                return (null, json, null, false, "illegal action");
+            }
+
+            var cardIndex = ReadInt(args, "card_index");
+            var targetIndex = ReadInt(args, "target_index");
+            var optionIndex = ReadInt(args, "option_index");
+            var x = ReadInt(args, "x");
+            var y = ReadInt(args, "y");
+            var tool = ReadString(args, "tool");
+            var actionsJson = await _bridge.GetAvailableActionsJsonAsync(cancellationToken);
+            var compactJson = await _bridge.GetCompactStateJsonAsync(cancellationToken);
+            checkState?.Invoke(compactJson);
+            var indexError = ActIndexValidator.Validate(
+                action,
+                cardIndex,
+                targetIndex,
+                optionIndex,
+                actionsJson,
+                compactJson);
+            if (indexError != null)
+            {
+                var json = JsonSerializer.Serialize(new
+                {
+                    error = indexError,
+                    action,
+                    card_index = cardIndex,
+                    target_index = targetIndex,
+                    option_index = optionIndex,
+                    x,
+                    y,
+                    tool
+                }, JsonOptions);
+                return (null, json, null, false, indexError);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await _bridge.ActAsync(
+                action,
+                cardIndex,
+                targetIndex,
+                optionIndex,
+                x,
+                y,
+                tool,
+                cancellationToken);
+            if (AgentErrorEnvelope.TryReadError(result, out var bridgeError))
+            {
+                return (null, result, null, false, bridgeError ?? "act failed");
+            }
+
+            if (ActIndexValidator.IsUnsettled(result))
+            {
+                var settled = await _bridge.WaitUntilActionableAsync(TimeSpan.FromSeconds(20), cancellationToken);
+                var latest = await _bridge.GetCompactStateJsonAsync(cancellationToken);
+                checkState?.Invoke(latest);
+                result = JsonSerializer.Serialize(new
+                {
+                    action,
+                    status = settled ? "completed" : "pending",
+                    stable = settled,
+                    previous = JsonSerializer.Deserialize<JsonElement>(result),
+                    state = JsonSerializer.Deserialize<JsonElement>(latest)
+                }, JsonOptions);
+                // A pending response tells the agent to stay inside this screen flow, not that the
+                // act failed: the game accepted it. Return it without an error so the retry policy
+                // does not spend the failure budget, and carry the unsettled flag so a long run of
+                // them can still be stopped.
+                return (action, result, NoProgressPolicy.Fingerprint(latest), !settled, null);
+            }
+
+            var settledState = await _bridge.GetCompactStateJsonAsync(cancellationToken);
+            checkState?.Invoke(settledState);
+            return (action, result, NoProgressPolicy.Fingerprint(settledState), false, null);
+        }
+        catch (AutoPlayStoppedException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (null, AgentErrorEnvelope.Serialize(ex, JsonOptions), null, false, ex.Message);
+        }
+    }
+
+    private static string InvokeCheckState(string json, Action<string>? checkState)
+    {
+        checkState?.Invoke(json);
+        return json;
+    }
+
+    private static void AppendJsonActFallbackIfNeeded(List<LlmMessage> messages, ResolvedModel resolved, bool allowAct)
+    {
+        if (resolved.Model.SupportsTools || !allowAct || messages.Count == 0 || messages[0].Role != "system")
+        {
+            return;
+        }
+
+        messages[0] = LlmMessage.System((messages[0].Content ?? string.Empty) + "\n\n" + PlayPrompt.JsonActFallback);
+    }
+
+    private static JsonDocument ParseArgs(string? argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson))
+        {
+            return JsonDocument.Parse("{}");
+        }
+
+        return JsonDocument.Parse(argumentsJson);
+    }
+
+    /// <summary>
+    /// Reads the model's optional one-sentence rationale from an act's arguments. The reason is
+    /// surfaced as the decision's <see cref="AgentTurnResult.Reasoning"/> so the overlay and any
+    /// future decision log show why the agent acted, including for models that never emit
+    /// reasoning_content of their own.
+    /// </summary>
+    internal static string? TryReadActReason(string? argumentsJson)
+    {
+        try
+        {
+            using var args = ParseArgs(argumentsJson);
+            var reason = ReadString(args, "reason")?.Trim();
+            return string.IsNullOrWhiteSpace(reason) ? null : reason;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadString(JsonDocument document, string name)
+    {
+        if (!document.RootElement.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => value.GetRawText()
+        };
+    }
+
+    private static int? ReadInt(JsonDocument document, string name)
+    {
+        if (!document.RootElement.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
+        {
+            return number;
+        }
+
+        if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var parsed))
+        {
+            return parsed;
+        }
+
+        return null;
+    }
+
+    private static double ReadTimeoutSeconds(JsonDocument document)
+    {
+        if (!document.RootElement.TryGetProperty("timeout_seconds", out var value))
+        {
+            return 20;
+        }
+
+        var seconds = value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetDouble(out var number) => number,
+            JsonValueKind.String when double.TryParse(value.GetString(), out var parsed) => parsed,
+            _ => 20
+        };
+
+        return Math.Clamp(seconds, 1, 120);
+    }
+}

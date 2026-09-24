@@ -1,0 +1,1360 @@
+using Godot;
+using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
+using STS2AIAgent.Agent;
+using STS2AIAgent.Config;
+using STS2AIAgent.Game;
+using STS2AIAgent.Localization;
+using STS2AIAgent.Server;
+using STS2AIAgent.Vision;
+
+namespace STS2AIAgent.Ui;
+
+internal sealed partial class AgentOverlayHost
+{
+    private const string LogPrefix = "[STS2AIAgent.Overlay]";
+    private const int PanelWidth = 440;
+
+    private static AgentOverlayHost? _instance;
+
+    private CanvasLayer? _layer;
+    private Control? _host;
+    private Control? _panel;
+    private Control? _dragHandle;
+    private Button? _edgeTab;
+    private SceneTree? _tree;
+    private bool _hotkeyWasDown;
+    private bool _dragging;
+    private Vector2 _lastViewportSize;
+    private ulong _lastRefreshMs;
+
+    private RichTextLabel? _chatLog;
+    private TextEdit? _chatInput;
+    private CheckBox? _attachState;
+    private CheckBox? _attachShot;
+    private CheckBox? _allowAct;
+    private Label? _playStatus;
+    private Label? _playScreen;
+    private Label? _playAction;
+    private Label? _playThought;
+    private Label? _playUsage;
+    private LineEdit? _maxTokensEdit;
+    private LineEdit? _maxRequestsEdit;
+    private CheckBox? _proactiveChatToggle;
+    private OptionButton? _proactiveToneCombo;
+    private Label? _apiLabel;
+    private Label? _dualStatus;
+    private Label? _teammateLive;
+    private Label? _firstRunHint;
+    private Label? _sessionHeadline;
+    private Label? _sessionDetail;
+    private Label? _sessionNext;
+    private Button? _dualLaunchButton;
+    private Button? _dualContinueButton;
+    private bool _continueLaunching;
+    private CheckBox? _companionChoiceToggle;
+    private Label? _dualHint;
+    private RichTextLabel? _teamChat;
+    private TextEdit? _teamInput;
+    private Button? _teamSend;
+    private Label? _teamStatus;
+    private Label? _teamControlStatus;
+    private Button? _teamPause;
+    private Button? _teamResume;
+    private Button? _playToggle;
+    private Button? _stepButton;
+    private Button? _sendButton;
+    private CheckBox? _mcpToggle;
+    private Label? _mcpStatus;
+    private Label? _mcpUrlLabel;
+    private TextEdit? _mcpConfigEdit;
+    private Control? _mcpInfoBox;
+    private Control? _pageHost;
+    private Control? _chatFooter;
+    private VBoxContainer? _settingsBody;
+    private int _buildAttempts;
+    private bool _captureHidden;
+    private bool _languageHooked;
+
+    private readonly List<EndpointEditors> _endpointEditors = new();
+    private readonly List<ModelEditors> _modelEditors = new();
+    private OptionButton? _conversationCombo;
+    private OptionButton? _playCombo;
+    private OptionButton? _visionCombo;
+    private LineEdit? _hotkeyEdit;
+    private Label? _saveStatus;
+    private Label? _testNotice;
+    private Label? _conversationTest;
+    private Label? _playTest;
+    private Label? _visionTest;
+    private Label? _deleteWarning;
+    private CheckBox? _showAdvanced;
+    private bool _settingsDirty;
+    private bool _rebuildingSettings;
+    private bool _showAdvancedValue;
+    private string? _budgetInputError;
+    private Label? _budgetHint;
+    private Label? _settingsLoadNotice;
+    private Label? _sessionConfigNotice;
+    private Button? _resetStatsButton;
+    private Button? _settingsResetStatsButton;
+
+    public static void Install()
+    {
+        if (_instance != null)
+        {
+            return;
+        }
+
+        _instance = new AgentOverlayHost();
+        AgentRuntime.Instance.Changed += _instance.OnRuntimeChanged;
+        ScreenshotService.BeginCapture = HideForCapture;
+        ScreenshotService.EndCapture = RestoreAfterCapture;
+        _instance.TryBuildOrRetry();
+    }
+
+    public static void Uninstall()
+    {
+        if (_instance == null)
+        {
+            return;
+        }
+
+        ScreenshotService.BeginCapture = null;
+        ScreenshotService.EndCapture = null;
+        AgentRuntime.Instance.Changed -= _instance.OnRuntimeChanged;
+        _instance.TearDown();
+        _instance = null;
+    }
+
+    private static void HideForCapture()
+    {
+        if (_instance?._panel == null || !_instance._panel.Visible)
+        {
+            return;
+        }
+
+        _instance._captureHidden = true;
+        _instance._panel.Visible = false;
+        if (_instance._edgeTab != null)
+        {
+            _instance._edgeTab.Visible = false;
+        }
+    }
+
+    private static void RestoreAfterCapture()
+    {
+        if (_instance == null || !_instance._captureHidden)
+        {
+            return;
+        }
+
+        _instance._captureHidden = false;
+        if (_instance._panel != null)
+        {
+            _instance._panel.Visible = true;
+        }
+
+        if (_instance._edgeTab != null)
+        {
+            _instance._edgeTab.Visible = true;
+        }
+    }
+
+    private void TryBuildOrRetry()
+    {
+        if (_layer != null)
+        {
+            return;
+        }
+
+        if (NGame.Instance != null)
+        {
+            Build();
+            return;
+        }
+
+        if (_buildAttempts++ > 180)
+        {
+            Log.Warn($"{LogPrefix} NGame never became ready; overlay unavailable this session");
+            return;
+        }
+
+        Callable.From(TryBuildOrRetry).CallDeferred();
+    }
+
+    private void Build()
+    {
+        var game = NGame.Instance;
+        if (game == null)
+        {
+            Log.Warn($"{LogPrefix} NGame is not ready; overlay retry scheduled");
+            TryBuildOrRetry();
+            return;
+        }
+
+        _tree = game.GetTree();
+        var root = _tree.Root;
+        _layer = new CanvasLayer
+        {
+            Name = "STS2AIAgentOverlay",
+            Layer = 128,
+            ProcessMode = Node.ProcessModeEnum.Always
+        };
+
+        var host = new Control
+        {
+            Name = "OverlayHost",
+            MouseFilter = Control.MouseFilterEnum.Ignore
+        };
+        host.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+
+        _host = host;
+
+        _edgeTab = UiFactory.Button("AI", ToggleVisible);
+        _edgeTab.CustomMinimumSize = new Vector2(36, 72);
+        _edgeTab.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
+        _edgeTab.Position = new Vector2(-80, 0);
+
+        _panel = new Control
+        {
+            Name = "AgentPanel",
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            ClipContents = true
+        };
+        _panel.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
+        _panel.CustomMinimumSize = new Vector2(PanelWidth, 360);
+
+        var chrome = new PanelContainer
+        {
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        chrome.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        chrome.AddThemeStyleboxOverride("panel", UiFactory.PanelStyle());
+
+        var layout = UiFactory.Column();
+        layout.AddChild(BuildHeader());
+        layout.AddChild(BuildTabs());
+
+        _pageHost = new Control
+        {
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+            ClipContents = true,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill
+        };
+        BuildPages(_pageHost);
+        layout.AddChild(_pageHost);
+        _chatFooter = BuildChatFooter();
+        layout.AddChild(_chatFooter);
+        chrome.AddChild(layout);
+        _panel.AddChild(chrome);
+        var startupSettings = AgentRuntime.Instance.Settings;
+        _panel.Visible = startupSettings.OverlayVisibleOnStart || !startupSettings.HasSeenFirstRunGuide;
+
+        host.AddChild(_edgeTab);
+        host.AddChild(_panel);
+        _layer.AddChild(host);
+        _layer.TreeEntered += OnOverlayEnteredTree;
+        root.CallDeferred(Node.MethodName.AddChild, _layer);
+        _tree.ProcessFrame += OnProcessFrame;
+        if (InstanceRole.IsCompanion)
+        {
+            ShowTab("play");
+        }
+        else if (!startupSettings.HasSeenFirstRunGuide)
+        {
+            ShowTab("settings");
+        }
+        else
+        {
+            ShowTab("dual");
+        }
+        RefreshDynamic();
+        var languageBefore = Loc.Current;
+        LocSource.Initialize();
+        HookLanguageChanges();
+        if (Loc.Current != languageBefore)
+        {
+            // The first localization pass can switch the language after this overlay's text was
+            // built; rebuild once we are safely out of this method.
+            Callable.From(OnLanguageChanged).CallDeferred();
+        }
+
+        Log.Info($"{LogPrefix} Attach scheduled");
+    }
+
+    private void OnOverlayEnteredTree()
+    {
+        if (_layer != null)
+        {
+            _layer.TreeEntered -= OnOverlayEnteredTree;
+        }
+
+        Log.Info($"{LogPrefix} Installed");
+        Callable.From(() => ApplyPlacement()).CallDeferred();
+    }
+
+    private Control BuildHeader()
+    {
+        _dragHandle = new PanelContainer
+        {
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            MouseDefaultCursorShape = Control.CursorShape.Move,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+        };
+        _dragHandle.AddThemeStyleboxOverride("panel", UiFactory.PanelStyle(UiFactory.BgRaised, 6));
+        _dragHandle.GuiInput += OnDragHandleGuiInput;
+        var title = UiFactory.Label("STS2 AI Agent", 16);
+        title.MouseFilter = Control.MouseFilterEnum.Ignore;
+        var hint = UiFactory.Label(Loc.T("拖动移动"), 11, muted: true);
+        hint.MouseFilter = Control.MouseFilterEnum.Ignore;
+        var handleColumn = UiFactory.Column();
+        handleColumn.MouseFilter = Control.MouseFilterEnum.Ignore;
+        handleColumn.SizeFlagsVertical = Control.SizeFlags.ShrinkBegin;
+        handleColumn.AddChild(title);
+        handleColumn.AddChild(hint);
+        _dragHandle.AddChild(handleColumn);
+
+        var hide = UiFactory.Button(Loc.T("隐藏"), ToggleVisible);
+        hide.CustomMinimumSize = new Vector2(64, 0);
+        hide.SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd;
+        _apiLabel = UiFactory.Label("", 12, muted: true);
+        var column = UiFactory.Column();
+        column.SizeFlagsVertical = Control.SizeFlags.ShrinkBegin;
+        var row = new HBoxContainer { MouseFilter = Control.MouseFilterEnum.Ignore };
+        row.AddChild(_dragHandle);
+        row.AddChild(hide);
+        column.AddChild(row);
+        column.AddChild(_apiLabel);
+        return column;
+    }
+
+    private void AddEndpoint()
+    {
+        var settings = HarvestSettings();
+        settings.Endpoints.Add(new LlmEndpoint { Name = Loc.T("新端点") });
+        PersistHarvested(settings);
+    }
+
+    private void AddModel()
+    {
+        var settings = HarvestSettings();
+        settings.Models.Add(new LlmModelConfig
+        {
+            EndpointId = settings.Endpoints.FirstOrDefault()?.Id ?? string.Empty,
+            Model = "gpt-4o",
+            DisplayName = Loc.T("新模型"),
+            ThinkingIntensity = "medium"
+        });
+        PersistHarvested(settings);
+    }
+
+    private void RemoveEndpoint(int index)
+    {
+        var settings = HarvestSettings();
+        if (index < 0 || index >= settings.Endpoints.Count)
+        {
+            return;
+        }
+
+        var impact = SettingsBinding.EndpointRemoval(settings, settings.Endpoints[index].Id);
+        if (impact.Blocked)
+        {
+            ShowDeleteWarning(impact.Message);
+            return;
+        }
+
+        settings.Endpoints.RemoveAt(index);
+        ModelRoleProbe.InvalidateMismatched(settings);
+        PersistHarvested(settings);
+    }
+
+    private void RemoveModel(int index)
+    {
+        var settings = HarvestSettings();
+        if (index < 0 || index >= settings.Models.Count)
+        {
+            return;
+        }
+
+        var impact = SettingsBinding.ModelRemoval(settings, settings.Models[index].Id);
+        if (impact.Blocked)
+        {
+            ShowDeleteWarning(impact.Message);
+            return;
+        }
+
+        settings.Models.RemoveAt(index);
+        ModelRoleProbe.InvalidateMismatched(settings);
+        PersistHarvested(settings);
+    }
+
+    private void ShowDeleteWarning(string message)
+    {
+        if (_deleteWarning != null)
+        {
+            _deleteWarning.Text = message;
+        }
+    }
+
+    private void SaveSettingsFromUi()
+    {
+        var settings = HarvestSettings();
+        ModelRoleProbe.InvalidateMismatched(settings);
+        var saveText = string.IsNullOrWhiteSpace(_budgetInputError)
+            ? Loc.T("已保存")
+            : Loc.T("已保存（预算未改：{0}）", _budgetInputError);
+        if (!PersistHarvested(settings))
+        {
+            return;
+        }
+
+        if (_saveStatus != null)
+        {
+            _saveStatus.Text = saveText;
+        }
+
+        if (_budgetHint != null && !string.IsNullOrWhiteSpace(_budgetInputError))
+        {
+            _budgetHint.Text = _budgetInputError;
+        }
+    }
+
+    private bool PersistHarvested(AgentSettings settings)
+    {
+        try
+        {
+            AgentRuntime.Instance.SaveSettings(settings);
+            _settingsDirty = false;
+            RebuildSettingsForm();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (_saveStatus != null)
+            {
+                _saveStatus.Text = FormatSettingsNotice(fallback: Loc.T("保存失败，原配置未被覆盖。"));
+            }
+
+            return false;
+        }
+    }
+
+    private void ResetSessionStatsFromUi()
+    {
+        AgentRuntime.Instance.TryResetSessionStats(out _);
+        RefreshDynamic();
+    }
+
+    private static string FormatSettingsNotice(string? fallback = null)
+    {
+        var notice = AgentRuntime.Instance.SettingsNotice;
+        if (notice.HasMessage)
+        {
+            var text = notice.Message;
+            if (!string.IsNullOrWhiteSpace(notice.BackupPath))
+            {
+                text += Loc.T(" 备份：{0}", notice.BackupPath);
+            }
+
+            return text;
+        }
+
+        return fallback ?? "";
+    }
+
+    private AgentSettings HarvestSettings()
+    {
+        var current = CloneSettings(AgentRuntime.Instance.Settings);
+        for (var i = 0; i < Math.Min(current.Endpoints.Count, _endpointEditors.Count); i++)
+        {
+            var editor = _endpointEditors[i];
+            var endpoint = current.Endpoints[i];
+            endpoint.Name = editor.Name.Text.Trim();
+            endpoint.BaseUrl = editor.Url.Text.Trim();
+            endpoint.ApiKey = editor.Key.Text;
+            endpoint.Enabled = editor.Enabled.ButtonPressed;
+        }
+
+        for (var i = 0; i < Math.Min(current.Models.Count, _modelEditors.Count); i++)
+        {
+            var editor = _modelEditors[i];
+            var model = current.Models[i];
+            model.DisplayName = editor.Display.Text.Trim();
+            model.Model = editor.ModelName.Text.Trim();
+            model.SupportsVision = editor.Vision.ButtonPressed;
+            model.SupportsTools = editor.Tools.ButtonPressed;
+            model.ThinkingMode = SelectedText(editor.ThinkingMode);
+            model.ThinkingIntensity = SelectedText(editor.ThinkingIntensity);
+            if (editor.Endpoint.Selected >= 0)
+            {
+                model.EndpointId = editor.Endpoint.GetItemMetadata(editor.Endpoint.Selected).AsString();
+            }
+        }
+
+        if (_conversationCombo != null)
+        {
+            current.ConversationModelId = EmptyToNull(SelectedMetadata(_conversationCombo));
+        }
+
+        if (_playCombo != null)
+        {
+            current.PlayModelId = EmptyToNull(SelectedMetadata(_playCombo));
+        }
+
+        if (_visionCombo != null)
+        {
+            current.VisionModelId = EmptyToNull(SelectedMetadata(_visionCombo));
+        }
+        current.ThinkingIntensity = current.FindModel(current.ConversationModelId)?.ThinkingIntensity
+            ?? current.ThinkingIntensity;
+        if (_hotkeyEdit != null)
+        {
+            current.Hotkey = _hotkeyEdit.Text.Trim() is { Length: > 0 } hotkey ? hotkey : "F8";
+        }
+
+        if (_proactiveChatToggle != null)
+        {
+            current.ProactiveChatEnabled = _proactiveChatToggle.ButtonPressed;
+        }
+
+        if (_companionChoiceToggle != null)
+        {
+            current.CompanionAutoSelectCharacter = !_companionChoiceToggle.ButtonPressed;
+        }
+
+        if (_proactiveToneCombo != null)
+        {
+            current.ProactiveChatTone = ProactiveChatTones.Normalize(SelectedMetadata(_proactiveToneCombo));
+        }
+
+        current.AttachStateInChat = _attachState?.ButtonPressed ?? true;
+        current.AttachScreenshotInChat = _attachShot?.ButtonPressed ?? false;
+        current.McpEnabled = _mcpToggle?.ButtonPressed ?? current.McpEnabled;
+        _budgetInputError = null;
+        if (_maxTokensEdit != null || _maxRequestsEdit != null)
+        {
+            if (!SessionBudgetLimits.TryHarvestBudget(
+                    current,
+                    _maxTokensEdit?.Text,
+                    _maxRequestsEdit?.Text,
+                    out var budgetError))
+            {
+                _budgetInputError = budgetError;
+            }
+        }
+
+        ModelRoleProbe.InvalidateMismatched(current);
+        return current;
+    }
+
+    private static AgentSettings CloneSettings(AgentSettings source)
+    {
+        // The copy lives in Config so the executable test project can cover it.
+        return SettingsClone.Clone(source);
+    }
+
+    private void ToggleVisible()
+    {
+        if (_panel == null)
+        {
+            return;
+        }
+
+        if (_panel.Visible)
+        {
+            FlushSettingsIfDirty();
+        }
+
+        _panel.Visible = !_panel.Visible;
+        AgentRuntime.Instance.PersistOverlayVisible(_panel.Visible);
+        if (_panel.Visible) RefreshDynamic();
+    }
+
+    private void TogglePlay()
+    {
+        if (AgentRuntime.Instance.PlayRunning)
+        {
+            AgentRuntime.Instance.StopAutoPlay();
+        }
+        else
+        {
+            AgentRuntime.Instance.StartAutoPlay();
+        }
+
+        RefreshDynamic();
+    }
+
+    private async Task SendChatAsync()
+    {
+        var text = _chatInput?.Text ?? string.Empty;
+        if (_chatInput != null)
+        {
+            _chatInput.Text = string.Empty;
+        }
+
+        PersistChatFlags();
+        await AgentRuntime.Instance.SendChatAsync(
+            text,
+            _attachState?.ButtonPressed ?? true,
+            _attachShot?.ButtonPressed ?? false,
+            _allowAct?.ButtonPressed ?? false,
+            CancellationToken.None);
+    }
+
+    private async Task TestConnectionAsync()
+    {
+        SaveSettingsFromUi();
+        await AgentRuntime.Instance.TestConnectionAsync(CancellationToken.None);
+        _settingsDirty = false;
+        RebuildSettingsForm();
+        ShowTab("settings");
+    }
+
+    private void PersistChatFlags()
+    {
+        AgentRuntime.Instance.PersistChatAttachFlags(
+            _attachState?.ButtonPressed ?? true,
+            _attachShot?.ButtonPressed ?? false);
+    }
+
+    private static void CopyText(string text)
+    {
+        DisplayServer.ClipboardSet(text);
+    }
+
+    private void CopyDiagnostics()
+    {
+        CopyText(AgentRuntime.Instance.ExportDiagnostics());
+        AgentRuntime.Instance.NotifyStatus(Loc.T("诊断已复制到剪贴板（不含 API Key 和对话正文）。"));
+    }
+
+    private void MarkSettingsDirty()
+    {
+        if (_rebuildingSettings)
+        {
+            return;
+        }
+
+        _settingsDirty = true;
+        if (_saveStatus != null)
+        {
+            _saveStatus.Text = Loc.T("未保存");
+        }
+    }
+
+    private void WatchLine(LineEdit edit)
+    {
+        edit.TextChanged += _ => MarkSettingsDirty();
+    }
+
+    private void WatchCheck(CheckBox check)
+    {
+        check.Toggled += _ => MarkSettingsDirty();
+    }
+
+    private void WatchCombo(OptionButton combo)
+    {
+        combo.ItemSelected += _ => MarkSettingsDirty();
+    }
+
+    private void FlushSettingsIfDirty()
+    {
+        if (!_settingsDirty || _settingsBody == null)
+        {
+            return;
+        }
+
+        SaveSettingsFromUi();
+    }
+
+    private async Task LaunchDualAsync()
+    {
+        FlushSettingsIfDirty();
+        // Same route choice as POST /action invite_ai_teammate: a verified play model means the
+        // teammate plays by itself; otherwise it launches for external takeover and comes up paused.
+        var settings = HarvestSettings();
+        var companionAutoPlay = FirstRunSetup.Evaluate(settings).ReadyToInvite;
+        await AgentRuntime.Instance.LaunchDualInstanceAsync(settings, companionAutoPlay, CancellationToken.None);
+        RefreshDynamic();
+    }
+
+    private async Task ContinueDualAsync()
+    {
+        FlushSettingsIfDirty();
+        var settings = HarvestSettings();
+        var companionAutoPlay = FirstRunSetup.Evaluate(settings).ReadyToInvite;
+        _continueLaunching = true;
+        try
+        {
+            RefreshDynamic();
+            await AgentRuntime.Instance.ContinueDualInstanceAsync(settings, companionAutoPlay, CancellationToken.None);
+        }
+        finally
+        {
+            _continueLaunching = false;
+        }
+        RefreshDynamic();
+    }
+
+    /// <summary>The tab's top line tells the truth about both routes: without a verified model the invite still works, the teammate just waits to be taken over.</summary>
+    private static string FirstRunHintText()
+    {
+        var firstRun = FirstRunSetup.Evaluate(AgentRuntime.Instance.Settings);
+        return firstRun.ReadyToInvite
+            ? firstRun.Hint
+            : Loc.T("游玩模型未配置或未验证：仍然可以邀请，队友会加入并进图，然后停在原地等待外部接管，不会自己出牌。想让它自己打，先在设置里配好模型并通过「测试连接」。");
+    }
+
+    private static string DualHintText()
+    {
+        var settings = AgentRuntime.Instance.Settings;
+        if (!settings.CompanionAutoSelectCharacter)
+        {
+            return Loc.T("请从主菜单邀请。第二窗口打开后，会停在选角界面让 AI 自己决定选角，也可以你切过去给它选好、点出发；之后它自己点开局事件并进图。");
+        }
+
+        return FirstRunSetup.Evaluate(settings).ReadyToInvite
+            ? Loc.T("请从主菜单邀请。第二窗口打开后，AI 会自己选角、点开局事件并进图。你继续在这个窗口操作自己的角色；轮到它时，它会自动出牌。")
+            : Loc.T("请从主菜单邀请。第二窗口打开后，AI 会加入并进图，然后停在原地等待外部接管，不会自己出牌；你继续在这个窗口操作自己的角色。");
+    }
+
+    /// <summary>Continue is offered only where continue_ai_teammate would be accepted: host main menu with a co-op save on disk.</summary>
+    private static bool CanOfferContinue()
+    {
+        if (InstanceRole.IsCompanion) return false;
+        try
+        {
+            return GameStateService.CanContinueAiTeammate(ActiveScreenContext.Instance.GetCurrentScreen());
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Invite is offered only where invite_ai_teammate would be advertised, including DualLaunching and PlayRunning.</summary>
+    private static bool CanOfferInvite()
+    {
+        if (InstanceRole.IsCompanion) return false;
+        try
+        {
+            return GameStateService.CanInviteAiTeammate(ActiveScreenContext.Instance.GetCurrentScreen());
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The screen behind the button changes with no runtime event the overlay could subscribe to, so
+    /// availability is re-read on the panel tick as well as whenever the tab comes into view. Without
+    /// the tick, a panel already sitting on this tab kept the button greyed out across the boot modal
+    /// clearing, and only a tab switch brought it back.
+    /// </summary>
+    private void RefreshContinueAvailability()
+    {
+        if (_dualLaunchButton != null)
+        {
+            var canInvite = CanOfferInvite();
+            _dualLaunchButton.Disabled = AgentRuntime.Instance.DualLaunching || !canInvite;
+        }
+
+        if (_dualContinueButton == null)
+        {
+            return;
+        }
+
+        var canContinue = CanOfferContinue();
+        _dualContinueButton.Disabled = AgentRuntime.Instance.DualLaunching || !canContinue;
+        _dualContinueButton.TooltipText = canContinue ? "" : Loc.T("主菜单上有联机存档时可用。");
+    }
+
+    private async Task SendTeamMessageAsync()
+    {
+        var text = _teamInput?.Text.Trim() ?? "";
+        if (text.Length == 0 || AgentRuntime.Instance.TeamMessagePending) return;
+        if (_teamInput != null) _teamInput.Text = "";
+        await AgentRuntime.Instance.SendTeamMessageAsync(text, CancellationToken.None);
+        await GameThread.InvokeAsync(RefreshDynamic);
+    }
+
+    private void OnRuntimeChanged()
+    {
+        _ = GameThread.InvokeAsync(RefreshDynamic);
+    }
+
+    private void RefreshDynamic()
+    {
+        if (_apiLabel != null)
+        {
+            _apiLabel.Text = Loc.T("{0}  ·  {1}  ·  热键 {2}", HttpServer.Instance.Prefix, InstanceRole.Current, AgentRuntime.Instance.Settings.Hotkey);
+        }
+
+        if (_playStatus != null)
+        {
+            _playStatus.Text = Loc.T("状态：{0}", AgentRuntime.Instance.Status);
+        }
+
+        if (_playScreen != null)
+        {
+            try
+            {
+                _playScreen.Text = Loc.T("屏幕：{0}", GameStateService.BuildStatePayload().screen);
+            }
+            catch
+            {
+                _playScreen.Text = Loc.T("屏幕：-");
+            }
+        }
+
+        if (_playAction != null)
+        {
+            _playAction.Text = Loc.T("最近动作：{0}", AgentRuntime.Instance.LastAction);
+        }
+
+        if (_playThought != null)
+        {
+            _playThought.Text = Loc.T("思考：{0}", Trim(AgentRuntime.Instance.LastThought, 240));
+        }
+
+        if (_playUsage != null)
+        {
+            _playUsage.Text = PlayerFacingSession.FormatUsage(
+                AgentRuntime.Instance.SessionUsageKnown,
+                AgentRuntime.Instance.SessionUsage,
+                AgentRuntime.Instance.SessionRequests);
+        }
+
+        var facing = AgentRuntime.Instance.PlayerFacing();
+        if (_sessionHeadline != null)
+        {
+            _sessionHeadline.Text = facing.Headline;
+        }
+
+        if (_sessionDetail != null)
+        {
+            _sessionDetail.Text = facing.Detail;
+        }
+
+        if (_sessionNext != null)
+        {
+            _sessionNext.Text = Loc.T("下一步：{0}", facing.NextAction);
+        }
+
+        RefreshDecisionPage(facing);
+
+        var canResetStats = SessionBudgetLimits.CanResetSessionStats(
+            AgentRuntime.Instance.PlayRunning,
+            AgentRuntime.Instance.PlayPhase);
+        if (_resetStatsButton != null)
+        {
+            _resetStatsButton.Disabled = !canResetStats;
+        }
+
+        if (_settingsResetStatsButton != null)
+        {
+            _settingsResetStatsButton.Disabled = !canResetStats;
+        }
+
+        if (_sessionConfigNotice != null)
+        {
+            _sessionConfigNotice.Text = FormatSettingsNotice();
+            _sessionConfigNotice.Visible = AgentRuntime.Instance.SettingsNotice.HasMessage;
+        }
+
+        if (_settingsLoadNotice != null)
+        {
+            _settingsLoadNotice.Text = FormatSettingsNotice();
+        }
+
+        if (_budgetHint != null && !string.IsNullOrWhiteSpace(_budgetInputError))
+        {
+            _budgetHint.Text = _budgetInputError;
+        }
+
+        if (_playTest != null)
+        {
+            var firstRun = FirstRunSetup.Evaluate(AgentRuntime.Instance.Settings);
+            if (_conversationTest != null) _conversationTest.Text = ModelRoleProbe.FormatLine(firstRun.Conversation);
+            _playTest.Text = ModelRoleProbe.FormatLine(firstRun.Play);
+            if (_visionTest != null) _visionTest.Text = ModelRoleProbe.FormatLine(firstRun.Vision);
+        }
+
+        if (_playToggle != null)
+        {
+            _playToggle.Disabled = AgentRuntime.Instance.DualLaunching;
+            _playToggle.Text = AgentRuntime.Instance.PlayRunning ? Loc.T("暂停自动游玩") : Loc.T("开始自动游玩");
+        }
+
+        if (_stepButton != null)
+        {
+            _stepButton.Disabled = AgentRuntime.Instance.PlayRunning;
+        }
+
+        if (_sendButton != null)
+        {
+            _sendButton.Disabled = AgentRuntime.Instance.PlayRunning;
+        }
+
+        if (_dualStatus != null)
+        {
+            _dualStatus.Text = AgentRuntime.Instance.DualStatus;
+        }
+
+        if (_teammateLive != null)
+        {
+            _teammateLive.Text = TeammateLiveText();
+        }
+
+        if (_firstRunHint != null)
+        {
+            _firstRunHint.Text = FirstRunHintText();
+        }
+
+        if (_dualLaunchButton != null)
+        {
+            // Only the button that started the launch reads as busy; the other one just greys out.
+            _dualLaunchButton.Text = AgentRuntime.Instance.DualLaunching && !_continueLaunching ? Loc.T("正在邀请队友…") : Loc.T("邀请 AI 队友");
+        }
+
+        RefreshContinueAvailability();
+
+        if (_dualContinueButton != null)
+        {
+            _dualContinueButton.Text = AgentRuntime.Instance.DualLaunching && _continueLaunching ? Loc.T("正在读档接回队友…") : Loc.T("继续上次联机对局");
+        }
+
+        if (_companionChoiceToggle != null)
+        {
+            _companionChoiceToggle.Disabled = InstanceRole.IsCompanion || AgentRuntime.Instance.DualLaunching;
+            _companionChoiceToggle.SetPressedNoSignal(!AgentRuntime.Instance.Settings.CompanionAutoSelectCharacter);
+        }
+
+        if (_dualHint != null) _dualHint.Text = DualHintText();
+
+        if (_teamSend != null)
+        {
+            _teamSend.Disabled = AgentRuntime.Instance.TeamMessagePending || AgentRuntime.Instance.DualLaunching || InstanceRole.IsCompanion;
+            _teamSend.Text = AgentRuntime.Instance.TeamMessagePending ? Loc.T("等待队友回复…") : Loc.T("和队友说");
+        }
+        if (_teamStatus != null) _teamStatus.Text = AgentRuntime.Instance.TeamStatus;
+        if (_teamControlStatus != null) _teamControlStatus.Text = AgentRuntime.Instance.TeamControlStatus;
+        var controlDisabled = InstanceRole.IsCompanion || AgentRuntime.Instance.DualLaunching || AgentRuntime.Instance.TeamControlPending;
+        if (_teamPause != null) _teamPause.Disabled = controlDisabled;
+        if (_teamResume != null) _teamResume.Disabled = controlDisabled;
+        if (_teamChat != null)
+        {
+            _teamChat.Clear();
+            foreach (var turn in AgentRuntime.Instance.TeamHistory)
+            {
+                var who = turn.Role == "user" ? Loc.T("你") : Loc.T("AI 队友");
+                _teamChat.AppendText($"[b]{who}[/b]\n{Escape(turn.Text)}\n\n");
+            }
+        }
+
+        if (_mcpStatus != null)
+        {
+            _mcpStatus.Text = AgentRuntime.Instance.McpStatus;
+        }
+
+        if (_mcpToggle != null)
+        {
+            _mcpToggle.SetPressedNoSignal(AgentRuntime.Instance.McpRunning);
+        }
+
+        if (_mcpInfoBox != null)
+        {
+            _mcpInfoBox.Visible = AgentRuntime.Instance.McpRunning;
+        }
+
+        if (_mcpUrlLabel != null)
+        {
+            var url = AgentRuntime.Instance.McpUrl;
+            _mcpUrlLabel.Text = string.IsNullOrWhiteSpace(url) ? "" : Loc.T("地址：{0}", url);
+        }
+
+        if (_mcpConfigEdit != null)
+        {
+            _mcpConfigEdit.Text = AgentRuntime.Instance.McpClientConfig;
+        }
+
+        if (_chatLog != null)
+        {
+            _chatLog.Clear();
+            var history = AgentRuntime.Instance.History;
+            if (history.Count == 0)
+            {
+                _chatLog.AppendText("[color=#b3b3ad]" + Loc.T("在下方输入后点发送。") + "[/color]\n");
+            }
+            else
+            {
+                foreach (var turn in history)
+                {
+                    var who = turn.Role == "user" ? Loc.T("你") : Loc.T("助手");
+                    _chatLog.AppendText($"[b]{who}[/b]\n{Escape(turn.Text)}\n\n");
+                }
+            }
+        }
+    }
+
+    private void OnProcessFrame()
+    {
+        var hotkeyName = AgentRuntime.Instance.Settings.Hotkey;
+        UiFactory.TryParseHotkey(hotkeyName, out var key);
+        var down = Input.IsPhysicalKeyPressed(key);
+        if (down && !_hotkeyWasDown)
+        {
+            ToggleVisible();
+        }
+
+        _hotkeyWasDown = down;
+
+        if (_host != null && _host.Size != _lastViewportSize)
+        {
+            ApplyPlacement(keepCurrent: _lastViewportSize != Vector2.Zero);
+        }
+
+        var now = Time.GetTicksMsec();
+        if (now - _lastRefreshMs > 800)
+        {
+            _lastRefreshMs = now;
+            if (_panel?.Visible == true)
+            {
+                if (_apiLabel != null)
+                {
+                    _apiLabel.Text = Loc.T("{0}  ·  {1}  ·  热键 {2}", HttpServer.Instance.Prefix, InstanceRole.Current, hotkeyName);
+                }
+
+                if (IsTabVisible(OverlayTabCatalog.Play) && _playScreen != null)
+                {
+                    try
+                    {
+                        _playScreen.Text = Loc.T("屏幕：{0}", GameStateService.BuildStatePayload().screen);
+                    }
+                    catch
+                    {
+                        _playScreen.Text = Loc.T("屏幕：-");
+                    }
+                }
+
+                // The tab-visible refresh in ShowTab covers switching into this page; this covers the
+                // page that is already open while the screen underneath changes on its own.
+                if (IsTabVisible(OverlayTabCatalog.Dual))
+                {
+                    RefreshContinueAvailability();
+                    // Cached inside the runtime and throttled there: this runs on the game thread, so
+                    // it asks for a refresh and renders whatever the last one produced.
+                    AgentRuntime.Instance.RequestTeammateStatusRefresh();
+                    if (_teammateLive != null)
+                    {
+                        _teammateLive.Text = TeammateLiveText();
+                    }
+                }
+
+                // Decisions reach the log from paths with no runtime event to subscribe to (an action
+                // submitted over the HTTP API records one without raising Changed), so the page that
+                // is already open re-reads it on the same tick.
+                if (IsTabVisible(OverlayTabCatalog.Decisions))
+                {
+                    RefreshDecisionPage(AgentRuntime.Instance.PlayerFacing());
+                }
+            }
+        }
+    }
+
+    private void TearDown()
+    {
+        FlushSettingsIfDirty();
+
+        if (_languageHooked)
+        {
+            _languageHooked = false;
+            Loc.LanguageChanged -= OnLanguageChanged;
+        }
+
+        if (_dragHandle != null)
+        {
+            _dragHandle.GuiInput -= OnDragHandleGuiInput;
+        }
+
+        if (_layer != null)
+        {
+            _layer.TreeEntered -= OnOverlayEnteredTree;
+        }
+
+        if (_tree != null)
+        {
+            _tree.ProcessFrame -= OnProcessFrame;
+        }
+
+        _layer?.QueueFree();
+        _layer = null;
+        _host = null;
+        _panel = null;
+        _dragHandle = null;
+        _tree = null;
+    }
+
+    private void HookLanguageChanges()
+    {
+        if (_languageHooked)
+        {
+            return;
+        }
+
+        _languageHooked = true;
+        Loc.LanguageChanged += OnLanguageChanged;
+    }
+
+    private void OnLanguageChanged()
+    {
+        // The game can raise this from its own thread; the overlay must be rebuilt on the game thread.
+        _ = GameThread.InvokeAsync(RebuildForLanguage);
+    }
+
+    private void RebuildForLanguage()
+    {
+        // Keep the window where the player left it instead of flashing closed or jumping to chat.
+        var hadPanel = _panel != null;
+        var wasVisible = _panel?.Visible ?? false;
+        var tab = _tab;
+        TearDown();
+        TryBuildOrRetry();
+        if (hadPanel && _panel != null)
+        {
+            _panel.Visible = wasVisible;
+        }
+
+        ShowTab(tab);
+    }
+
+    private void OnDragHandleGuiInput(InputEvent evt)
+    {
+        if (_panel == null || _dragHandle == null)
+        {
+            return;
+        }
+
+        if (evt is InputEventMouseButton button && button.ButtonIndex == MouseButton.Left)
+        {
+            _dragging = button.Pressed;
+            _dragHandle.AcceptEvent();
+            if (!button.Pressed)
+            {
+                PersistCurrentPlacement();
+            }
+
+            return;
+        }
+
+        if (evt is InputEventMouseMotion motion && _dragging)
+        {
+            MovePanel(_panel.Position + motion.Relative);
+            _dragHandle.AcceptEvent();
+        }
+    }
+
+    private void ResetPlacement()
+    {
+        AgentRuntime.Instance.PersistOverlayPlacement(null, null);
+        _lastViewportSize = Vector2.Zero;
+        ApplyPlacement();
+    }
+
+    private void ApplyPlacement(bool keepCurrent = false)
+    {
+        if (_panel == null || _host == null || !_panel.IsInsideTree())
+        {
+            return;
+        }
+
+        var viewport = ReadViewportSize();
+        if (viewport.X < 32 || viewport.Y < 32)
+        {
+            return;
+        }
+
+        var size = PanelSizeFor(viewport);
+        Vector2 position;
+        if (keepCurrent)
+        {
+            position = _panel.Position;
+        }
+        else
+        {
+            var settings = AgentRuntime.Instance.Settings;
+            var defaultX = viewport.X - size.X - 12;
+            var defaultY = 40f;
+            position = new Vector2(settings.OverlayLeft ?? defaultX, settings.OverlayTop ?? defaultY);
+        }
+
+        _panel.Size = size;
+        _panel.CustomMinimumSize = new Vector2(PanelWidth, Math.Min(size.Y, 360));
+        MovePanel(position, persist: false);
+        _lastViewportSize = viewport;
+    }
+
+    private void MovePanel(Vector2 position, bool persist = false)
+    {
+        if (_panel == null || _host == null)
+        {
+            return;
+        }
+
+        var viewport = ReadViewportSize();
+        if (viewport.X < 32 || viewport.Y < 32)
+        {
+            return;
+        }
+
+        var size = _panel.Size;
+        if (size.X < 32 || size.Y < 32)
+        {
+            size = PanelSizeFor(viewport);
+            _panel.Size = size;
+        }
+
+        var maxX = Math.Max(8, viewport.X - size.X - 8);
+        var maxY = Math.Max(8, viewport.Y - size.Y - 8);
+        var clamped = new Vector2(
+            Math.Clamp(position.X, 8, maxX),
+            Math.Clamp(position.Y, 8, maxY));
+        _panel.Position = clamped;
+        PlaceEdgeTab(viewport);
+        if (persist)
+        {
+            PersistCurrentPlacement();
+        }
+    }
+
+    private void PlaceEdgeTab(Vector2 viewport)
+    {
+        if (_edgeTab == null || _panel == null)
+        {
+            return;
+        }
+
+        var tabSize = _edgeTab.CustomMinimumSize;
+        var onLeft = _panel.Position.X + _panel.Size.X * 0.5f < viewport.X * 0.5f;
+        var y = Math.Clamp(_panel.Position.Y + 16, 8, Math.Max(8, viewport.Y - tabSize.Y - 8));
+        _edgeTab.Position = onLeft
+            ? new Vector2(4, y)
+            : new Vector2(viewport.X - tabSize.X - 4, y);
+    }
+
+    private void PersistCurrentPlacement()
+    {
+        if (_panel == null)
+        {
+            return;
+        }
+
+        AgentRuntime.Instance.PersistOverlayPlacement(_panel.Position.X, _panel.Position.Y);
+    }
+
+    private Vector2 ReadViewportSize()
+    {
+        if (_host == null)
+        {
+            return Vector2.Zero;
+        }
+
+        if (_host.Size.X >= 32 && _host.Size.Y >= 32)
+        {
+            return _host.Size;
+        }
+
+        if (!_host.IsInsideTree())
+        {
+            return Vector2.Zero;
+        }
+
+        return _host.GetViewportRect().Size;
+    }
+
+    private static Vector2 PanelSizeFor(Vector2 viewport)
+    {
+        var height = Math.Clamp(viewport.Y * 0.72f, 520f, Math.Max(520f, viewport.Y - 80f));
+        return new Vector2(PanelWidth, height);
+    }
+
+    private static string SelectedText(OptionButton? combo)
+    {
+        if (combo == null || combo.Selected < 0)
+        {
+            return string.Empty;
+        }
+
+        return combo.GetItemText(combo.Selected);
+    }
+
+    private static string SelectedMetadata(OptionButton? combo)
+    {
+        if (combo == null || combo.Selected < 0)
+        {
+            return string.Empty;
+        }
+
+        return combo.GetItemMetadata(combo.Selected).AsString();
+    }
+
+    private static void SelectByText(OptionButton combo, string? value)
+    {
+        for (var i = 0; i < combo.ItemCount; i++)
+        {
+            if (string.Equals(combo.GetItemText(i), value, StringComparison.OrdinalIgnoreCase))
+            {
+                combo.Selected = i;
+                return;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            // Preserve an unknown value visibly until the user chooses a supported option.
+            // Falling back to item 0 would silently rewrite the model configuration on save.
+            combo.AddItem(value);
+            combo.Selected = combo.ItemCount - 1;
+            return;
+        }
+
+        combo.Selected = combo.ItemCount > 0 ? 0 : -1;
+    }
+
+    private static string? EmptyToNull(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string Trim(string? text, int max)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "-";
+        }
+
+        text = text.Replace("\n", " ");
+        return text.Length <= max ? text : text[..max] + "…";
+    }
+
+    private static string Escape(string text)
+    {
+        return text.Replace("[", "［").Replace("]", "］");
+    }
+
+    private sealed record EndpointEditors(string Id, LineEdit Name, LineEdit Url, LineEdit Key, CheckBox Enabled);
+
+    private sealed record ModelEditors(
+        string Id,
+        LineEdit Display,
+        LineEdit ModelName,
+        OptionButton Endpoint,
+        CheckBox Vision,
+        CheckBox Tools,
+        OptionButton ThinkingMode,
+        OptionButton ThinkingIntensity);
+}

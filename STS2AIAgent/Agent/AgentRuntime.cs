@@ -1,0 +1,1355 @@
+using MegaCrit.Sts2.Core.Logging;
+using STS2AIAgent.Config;
+using STS2AIAgent.Game;
+using STS2AIAgent.Llm;
+using STS2AIAgent.Localization;
+using STS2AIAgent.Multiplayer;
+using STS2AIAgent.Server;
+
+namespace STS2AIAgent.Agent;
+
+/// <summary>
+/// Outcome of a teammate start/pause request. <see cref="Phase"/> is the companion's own play phase
+/// ("running", "paused", "stopping") or a transport-level word ("busy", "refused"); <see cref="Ok"/>
+/// is the field to branch on, because <see cref="Message"/> is localized display text.
+/// </summary>
+internal readonly record struct TeammateControlResult(bool Ok, string Phase, string Message);
+
+internal sealed partial class AgentRuntime
+{
+    private const string LogPrefix = "[STS2AIAgent.Runtime]";
+
+    /// <summary>How often the overlay's tick may ask for a fresh teammate summary.</summary>
+    private const long TeammateStatusRefreshMs = 2000;
+
+    private static readonly Lazy<AgentRuntime> LazyInstance = new(() => new AgentRuntime());
+
+    private readonly object _gate = new();
+    private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly SemaphoreSlim _dualLaunchGate = new(1, 1);
+    private volatile bool _dualLaunching;
+    private readonly SettingsStore _store = new();
+    private readonly List<ChatTurn> _history = new();
+    private readonly TeamConversation _teamConversation = new();
+    private readonly SemaphoreSlim _teamMessageGate = new(1, 1);
+    private volatile bool _teamMessagePending;
+    private string? _teamStatus;
+    private CancellationTokenSource _lifetime = new();
+    private readonly AutoPlaySession _playSession = new();
+    private CurrentRunBoundary _runBoundary = new();
+    private readonly object _playLifecycleGate = new();
+    private long _playGeneration;
+    private PlaySessionIdentity? _playSessionIdentity;
+    private readonly SemaphoreSlim _companionControlGate = new(1, 1);
+    private readonly SemaphoreSlim _remoteControlGate = new(1, 1);
+    private volatile bool _teamControlPending;
+    private string? _teamControlStatus;
+    private volatile bool _companionReady;
+    private volatile bool _companionAutoStartSuppressed;
+    private volatile bool _companionAutoPlay = true;
+    private AgentSettings _settings;
+    private readonly AgentLoop _loop;
+    private string? _status;
+    private string _lastAction = "-";
+    private string _lastThought = "-";
+    private string? _dualStatus;
+    private volatile DualLaunchOutcome _dualLaunchOutcome = DualLaunchOutcome.Idle;
+    private string? _mcpStatus;
+    private LlmUsage _sessionUsage = LlmUsage.Empty;
+    private int _sessionRequests;
+    private bool _sessionUsageKnown;
+    private string? _stopKind;
+    private string? _stopDetail;
+    private string? _stopRole;
+    private bool _waitingForGame;
+    private bool _waitingForPlayer;
+    private bool _requestingModel;
+    private volatile bool _requestingModelStatus;
+    private readonly List<string> _diagnosticEvents = new();
+    private readonly DecisionLog _decisions = new(
+        System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(SettingsStore.DefaultPath()) ?? ".",
+            "decisions.jsonl"));
+    private SessionBudgetGuard _budgetGuard;
+    private string? _proactiveSituationKey;
+    private readonly ProactiveChatSession _proactiveChat = new();
+    private string? _teammateLiveStatus;
+    private long _teammateStatusAtMs;
+    private volatile bool _teammateStatusRefreshing;
+
+    public static AgentRuntime Instance => LazyInstance.Value;
+
+    public event Action? Changed;
+
+    private AgentRuntime()
+    {
+        _settings = _store.Load();
+        _budgetGuard = _settings.CreateBudgetGuard();
+        _loop = new AgentLoop(new GameBridge(), new DefaultLlmClientFactory(), () =>
+        {
+            lock (_gate)
+            {
+                return _settings;
+            }
+        }, InstanceRole.IsCompanion ? () => _teamConversation.BuildTeamContext() : null,
+            () =>
+            {
+                lock (_gate)
+                {
+                    return _budgetGuard;
+                }
+            });
+    }
+
+    public AgentSettings Settings
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _settings;
+            }
+        }
+    }
+
+    public bool PlayRunning => _playSession.IsActive;
+    public string PlayPhase => _playSession.Phase;
+    public bool TeamControlPending => _teamControlPending;
+
+    /// <summary>
+    /// False when the running teammate was launched for an external agent instead of for auto-play,
+    /// which is what an unverified play model selects. Reported on /health so a caller can tell
+    /// "paused on purpose, waiting for me" from "stopped by itself".
+    /// </summary>
+    public bool CompanionAutoPlay => _companionAutoPlay;
+
+    // The idle wording is resolved on read rather than stored, so switching the game language
+    // updates it too. Once real progress arrives, the recorded text takes over.
+    public string TeamControlStatus => _teamControlStatus ?? Loc.T("队友控制尚未连接。");
+
+    public async Task ControlTeammateAsync(bool running, CancellationToken cancellationToken)
+    {
+        await ControlTeammateResultAsync(running, cancellationToken);
+    }
+
+    /// <summary>
+    /// Asks the teammate window to start or pause. The structured result exists for
+    /// <c>POST /teammate/control</c>: a caller outside this process cannot read the localized
+    /// <see cref="TeamControlStatus"/> to tell a confirmed pause from a refused one.
+    /// </summary>
+    public async Task<TeammateControlResult> ControlTeammateResultAsync(bool running, CancellationToken cancellationToken)
+    {
+        if (!await _remoteControlGate.WaitAsync(0, cancellationToken))
+        {
+            return new TeammateControlResult(false, "busy", Loc.T("上一次队友控制还没有完成，请稍后重试。"));
+        }
+
+        _teamControlPending = true;
+        _teamControlStatus = running ? Loc.T("正在请求队友继续…") : Loc.T("正在等待队友暂停；已提交的动作会先完成。");
+        RaiseChanged();
+        try
+        {
+            if (_dualLaunching) throw new InvalidOperationException(Loc.T("请等待组队完成。"));
+            if (LocalDualInstanceLauncher.CompanionProcessExited)
+            {
+                throw new InvalidOperationException(Loc.T("队友进程已退出。请回到主菜单重新邀请。"));
+            }
+
+            var connection = LocalDualInstanceLauncher.Connection ?? throw new InvalidOperationException(Loc.T("请先邀请 AI 队友。"));
+            if (running)
+            {
+                var firstRun = FirstRunSetup.Evaluate(Settings);
+                if (!firstRun.ReadyToInvite)
+                {
+                    throw new InvalidOperationException(firstRun.Hint);
+                }
+            }
+
+            var phase = await connection.ControlAsync(running, cancellationToken);
+            _teamControlStatus = phase switch
+            {
+                "paused" => Loc.T("队友已暂停。仍然可以聊天，点击继续后才会自动行动。"),
+                "running" => Loc.T("队友正在自动游玩。"),
+                _ => Loc.T("队友仍在停止当前任务，请稍后再次确认暂停。")
+            };
+            return new TeammateControlResult(true, phase, _teamControlStatus);
+        }
+        catch (Exception ex)
+        {
+            _teamControlStatus = Loc.T("未确认队友控制结果：{0}", ex.Message);
+            return new TeammateControlResult(false, "refused", ex.Message);
+        }
+        finally
+        {
+            _teamControlPending = false;
+            _remoteControlGate.Release();
+            RaiseChanged();
+        }
+    }
+
+    public async Task<string> SetCompanionRunningAsync(bool running, CancellationToken cancellationToken)
+    {
+        if (!InstanceRole.IsCompanion) throw new InvalidOperationException("Only a companion can receive control requests.");
+        await _companionControlGate.WaitAsync(cancellationToken);
+        try
+        {
+            _companionAutoStartSuppressed = true;
+            if (running)
+            {
+                if (!_companionReady) throw new InvalidOperationException(Loc.T("队友尚未完成组队，请稍后继续。"));
+                // Starting the in-process loop is one decision no matter who asks for it, so the
+                // companion answers to the same model gate as the host's Resume button and
+                // POST /teammate/control. Without this, the companion's own /session/control was a
+                // way to start a model loop that every other entry point refuses. Pausing is always
+                // allowed: no caller should be stuck unable to stop it.
+                var firstRun = FirstRunSetup.Evaluate(Settings);
+                if (!firstRun.ReadyToInvite) throw new InvalidOperationException(firstRun.Hint);
+                StartAutoPlay();
+            }
+            else
+            {
+                var stopping = _playSession.RequestPause();
+                SetStatus(stopping.IsCompleted ? Loc.T("已暂停自动游玩") : Loc.T("正在暂停，等待当前任务完成…"));
+                NoteEvent(Status);
+                try
+                {
+                    await stopping.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+                }
+                catch (AutoPlayStoppedException)
+                {
+                    // The loop already ended; treat that as a completed pause.
+                }
+                if (PlayPhase == "paused") SetStatus(Loc.T("已暂停自动游玩"));
+            }
+            return PlayPhase;
+        }
+        finally { _companionControlGate.Release(); }
+    }
+
+    public string Status => _status ?? Loc.T("就绪");
+
+    public string LastAction => _lastAction;
+
+    public string LastThought => _lastThought;
+
+    public IReadOnlyList<DecisionLogEntry> RecentDecisions(int limit = 50) => _decisions.Snapshot(limit);
+
+    public string DecisionLogJson(int limit = 50) => _decisions.RenderJson(limit);
+
+    /// <summary>
+    /// The run identity the automatic session has observed, or null before one is known. Decisions
+    /// are attributed with it so a session that spans two runs can report them separately.
+    /// </summary>
+    public string? CurrentRunId => _runBoundary.RunId;
+
+    /// <summary>What the current run has cost so far, or the whole log when no run is known yet.</summary>
+    public RunSpend CurrentRunSpend() => _decisions.Spend(_runBoundary.RunId);
+
+    internal DecisionLogEntry RecordDecision(
+        string source,
+        string action,
+        string? reason = null,
+        string? stateFingerprint = null,
+        int requestsSpent = 0,
+        int? totalTokens = null,
+        string? runId = null)
+    {
+        return _decisions.Record(
+            source,
+            action,
+            reason,
+            stateFingerprint,
+            requestsSpent,
+            totalTokens,
+            // The caller may know the run (the HTTP route and the native MCP tool both do); when it
+            // does not, the boundary's observation is the best available answer.
+            runId: runId ?? _runBoundary.RunId);
+    }
+
+    public LlmUsage SessionUsage
+    {
+        get { lock (_gate) return _sessionUsage; }
+    }
+
+    public int SessionRequests
+    {
+        get { lock (_gate) return _sessionRequests; }
+    }
+
+    public string? StopKind
+    {
+        get { lock (_playLifecycleGate) return _stopKind; }
+    }
+
+    public bool TryResetSessionStats(out string message)
+    {
+        if (!SessionBudgetLimits.CanResetSessionStats(PlayRunning, PlayPhase))
+        {
+            message = Loc.T("自动游玩进行中，不能清零本会话统计。请先暂停。暂停/继续不会清零累计。");
+            SetStatus(message);
+            RaiseChanged();
+            return false;
+        }
+
+        lock (_gate)
+        {
+            _sessionUsage = LlmUsage.Empty;
+            _sessionRequests = 0;
+            _sessionUsageKnown = false;
+            _budgetGuard = _settings.CreateBudgetGuard();
+            _proactiveChat.Reset();
+        }
+
+        message = Loc.T("已清零本会话统计。预算上限未改；继续游玩将重新计数。");
+        SetStatus(message);
+        RaiseChanged();
+        return true;
+    }
+
+    public string DualStatus => _dualStatus ?? Loc.T("尚未启动双开。");
+    public DualLaunchOutcome DualLaunchOutcome => _dualLaunchOutcome;
+    public bool DualLaunching => _dualLaunching;
+    public bool TeamMessagePending => _teamMessagePending;
+    public string TeamStatus => _teamStatus ?? Loc.T("组队后，可以在这里和 AI 队友商量打法。");
+    public IReadOnlyList<ChatTurn> TeamHistory => _teamConversation.Snapshot();
+
+    public string McpStatus => _mcpStatus ?? Loc.T("MCP 已关闭，未对外暴露。");
+
+    public string? McpUrl => NativeMcpServer.Runtime?.EndpointUrl;
+
+    public bool McpRunning => NativeMcpServer.Runtime?.Enabled == true;
+
+    public string McpClientConfig => NativeMcpServer.FormatClientConfigJson(McpUrl ?? McpEndpointUrl());
+
+    public string SettingsPath => _store.Path;
+
+    public SettingsPersistenceNotice SettingsNotice => _store.LastNotice;
+
+    public IReadOnlyList<ChatTurn> History
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _history.ToArray();
+            }
+        }
+    }
+
+    public void Initialize()
+    {
+        NativeMcpServer.BindRuntime(
+            new GameBridge(),
+            Router.BuildHealthData,
+            Router.ModVersion,
+            _decisions);
+        // The overlay, /decisions, and the SSE stream are three views of one log, so the mirror is
+        // attached once, here, rather than each writer remembering to announce itself.
+        _decisions.Recorded += GameEventService.Instance.PublishDecision;
+        ApplyMcpFromSettings();
+        AppendLog($"API {Server.HttpServer.Instance.Prefix}  role={InstanceRole.Current}");
+        if (InstanceRole.IsCompanion)
+        {
+            SetStatus(Loc.T("同伴实例：正在加入大厅"));
+            _ = Task.Run(() => CompanionEntryAsync(_lifetime.Token));
+        }
+    }
+
+    public void Shutdown()
+    {
+        StopAutoPlay();
+        NativeMcpServer.Runtime?.SetEnabled(false, McpEndpointUrl());
+        try
+        {
+            _lifetime.Cancel();
+        }
+        catch
+        {
+        }
+    }
+
+    public void SaveSettings(AgentSettings settings)
+    {
+        settings.EnsureValidShape();
+        _store.Save(settings);
+        lock (_gate)
+        {
+            _settings = settings;
+            _budgetGuard.UpdateLimits(settings.MaxSessionTokens, settings.MaxSessionRequests);
+        }
+
+        ApplyMcpFromSettings();
+        RaiseChanged();
+    }
+
+    // These setters run straight from overlay callbacks. SettingsStore.Save rethrows IO and access
+    // failures, and an exception escaping a Godot signal callback would leave a toggle showing a
+    // state the file never recorded, so the failure is reported in the status line instead.
+    private void SaveSettingsQuietly()
+    {
+        try
+        {
+            _store.Save(_settings);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            SetStatus(Loc.T("设置保存失败，原配置文件未被覆盖。请检查磁盘空间或文件占用后重试。"));
+            NoteEvent("settings save failed: " + ex.GetType().Name);
+        }
+    }
+
+    public void PersistOverlayVisible(bool visible)
+    {
+        lock (_gate)
+        {
+            _settings.OverlayVisibleOnStart = visible;
+            _settings.HasSeenFirstRunGuide = true;
+            SaveSettingsQuietly();
+        }
+    }
+
+    public void MarkFirstRunGuideSeen()
+    {
+        lock (_gate)
+        {
+            if (_settings.HasSeenFirstRunGuide)
+            {
+                return;
+            }
+
+            _settings.HasSeenFirstRunGuide = true;
+            SaveSettingsQuietly();
+        }
+    }
+
+    public void PersistOverlayPlacement(float? left, float? top)
+    {
+        lock (_gate)
+        {
+            _settings.OverlayLeft = left;
+            _settings.OverlayTop = top;
+            SaveSettingsQuietly();
+        }
+    }
+
+    public void PersistChatAttachFlags(bool attachState, bool attachScreenshot)
+    {
+        lock (_gate)
+        {
+            _settings.AttachStateInChat = attachState;
+            _settings.AttachScreenshotInChat = attachScreenshot;
+            SaveSettingsQuietly();
+        }
+    }
+
+    public AgentSettings ReloadSettings()
+    {
+        var loaded = _store.Load();
+        lock (_gate)
+        {
+            _settings = loaded;
+            _budgetGuard.UpdateLimits(loaded.MaxSessionTokens, loaded.MaxSessionRequests);
+        }
+
+        RaiseChanged();
+        return loaded;
+    }
+
+    public Task SendChatAsync(
+        string text,
+        bool attachState,
+        bool attachScreenshot,
+        bool allowAct,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(() => SendChatCoreAsync(text, attachState, attachScreenshot, allowAct, cancellationToken), cancellationToken);
+    }
+
+    public Task<string> TestConnectionAsync(CancellationToken cancellationToken)
+    {
+        return Task.Run(() => TestConnectionCoreAsync(force: true, cancellationToken), cancellationToken);
+    }
+
+    public void StartAutoPlay()
+    {
+        if (_dualLaunching)
+        {
+            SetStatus(Loc.T("正在组队，请等待 AI 队友连接完成。"));
+            return;
+        }
+
+        if (PlayRunning)
+        {
+            return;
+        }
+
+        Task task;
+        PlaySessionIdentity identity;
+        lock (_playLifecycleGate)
+        {
+            // The boundary is scoped to one automatic session, so a run that started while
+            // auto-play was paused is the session's run rather than an identity change.
+            _runBoundary = new CurrentRunBoundary();
+            var started = _playSession.TryStart(AutoPlayLoopAsync, _lifetime.Token);
+            if (started == null) return;
+
+            task = started;
+
+            identity = new PlaySessionIdentity(++_playGeneration, task);
+            _playSessionIdentity = identity;
+            _proactiveChat.BeginSession();
+            _stopKind = null;
+            _stopDetail = null;
+            _stopRole = null;
+            _waitingForGame = false;
+            _waitingForPlayer = false;
+            _requestingModel = true;
+        }
+
+        SetStatus(Loc.T("自动游玩中"));
+        _ = ObservePlayCompletionAsync(task, identity);
+    }
+
+    public void StopAutoPlay()
+    {
+        if (InstanceRole.IsCompanion) _companionAutoStartSuppressed = true;
+        var task = _playSession.RequestPause();
+        SetStatus(task.IsCompleted ? Loc.T("已暂停自动游玩") : Loc.T("正在暂停，等待当前任务完成…"));
+        NoteEvent(Status);
+    }
+
+    public void SetMcpEnabled(bool enabled)
+    {
+        lock (_gate)
+        {
+            _settings.McpEnabled = enabled;
+            SaveSettingsQuietly();
+        }
+
+        ApplyMcpFromSettings();
+        RaiseChanged();
+    }
+
+    public Task StepOnceAsync(CancellationToken cancellationToken)
+    {
+        return Task.Run(() => StepOnceCoreAsync(cancellationToken), cancellationToken);
+    }
+
+    public Task LaunchDualInstanceAsync(AgentSettings settings, CancellationToken cancellationToken)
+    {
+        return LaunchDualInstanceAsync(settings, companionAutoPlay: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// <paramref name="companionAutoPlay"/> false is the external-takeover route: the teammate is
+    /// launched for an outside agent, so no play model is required and it comes up paused.
+    /// </summary>
+    /// <summary>
+    /// Starts a launch, or returns null when another attempt already owns the gate. A caller that
+    /// cannot claim the gate owns no attempt and must not read <see cref="DualLaunchOutcome"/>:
+    /// the winning thread writes that field after claiming, and a failed claim is not ordered after
+    /// that write, so a loser can still observe Idle or the previous attempt's terminal outcome.
+    /// Null is the only reliable "this attempt is not mine" signal.
+    /// </summary>
+    public Task? TryLaunchDualInstanceAsync(AgentSettings settings, bool companionAutoPlay, CancellationToken cancellationToken)
+    {
+        if (!TryBeginDualLaunch())
+        {
+            return null;
+        }
+
+        return Task.Run(
+            () => LaunchDualInstanceCoreAsync(settings, cancellationToken, continueRun: false, companionAutoPlay),
+            CancellationToken.None);
+    }
+
+    public Task LaunchDualInstanceAsync(AgentSettings settings, bool companionAutoPlay, CancellationToken cancellationToken)
+    {
+        return TryLaunchDualInstanceAsync(settings, companionAutoPlay, cancellationToken) ?? Task.CompletedTask;
+    }
+
+    public Task ContinueDualInstanceAsync(AgentSettings settings, CancellationToken cancellationToken)
+    {
+        return ContinueDualInstanceAsync(settings, companionAutoPlay: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// Continue-route twin of <see cref="TryLaunchDualInstanceAsync"/>: null means the gate is
+    /// already owned, so the caller reports pending instead of classifying someone else's outcome.
+    /// </summary>
+    public Task? TryContinueDualInstanceAsync(AgentSettings settings, bool companionAutoPlay, CancellationToken cancellationToken)
+    {
+        if (!TryBeginDualLaunch())
+        {
+            return null;
+        }
+
+        return Task.Run(
+            () => LaunchDualInstanceCoreAsync(settings, cancellationToken, continueRun: true, companionAutoPlay),
+            CancellationToken.None);
+    }
+
+    public Task ContinueDualInstanceAsync(AgentSettings settings, bool companionAutoPlay, CancellationToken cancellationToken)
+    {
+        return TryContinueDualInstanceAsync(settings, companionAutoPlay, cancellationToken) ?? Task.CompletedTask;
+    }
+
+    public void ClearChat()
+    {
+        lock (_gate)
+        {
+            _history.Clear();
+        }
+
+        RaiseChanged();
+    }
+
+    private async Task SendChatCoreAsync(
+        string text,
+        bool attachState,
+        bool attachScreenshot,
+        bool allowAct,
+        CancellationToken cancellationToken)
+    {
+        text = text.Trim();
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        if (PlayRunning)
+        {
+            AddHistory("assistant", Loc.T("自动游玩进行中。请先暂停，再对话或代打。"));
+            return;
+        }
+
+        string? budgetBlocked = null;
+        lock (_gate)
+        {
+            budgetBlocked = _budgetGuard.CheckBudget();
+        }
+
+        if (budgetBlocked != null)
+        {
+            AddHistory("user", text);
+            AddHistory("assistant", budgetBlocked);
+            return;
+        }
+
+        var prior = History;
+        AddHistory("user", text);
+        SetRequestingModelStatus();
+        try
+        {
+            await _turnGate.WaitAsync(cancellationToken);
+            AgentTurnResult result;
+            try
+            {
+                result = await _loop.ChatAsync(
+                text,
+                prior,
+                new ChatOptions
+                {
+                    AttachState = attachState,
+                    AttachScreenshot = attachScreenshot,
+                    AllowAct = allowAct
+                },
+                cancellationToken);
+            }
+            finally
+            {
+                _turnGate.Release();
+            }
+
+            AccountTurn(result, recordBudget: true);
+
+            var reply = result.Error != null
+                ? result.Error
+                : string.IsNullOrWhiteSpace(result.AssistantText) ? Loc.T("(无文本回复)") : result.AssistantText;
+            AddHistory("assistant", reply);
+            _lastThought = result.Reasoning ?? reply;
+            if (!string.IsNullOrWhiteSpace(result.Acted))
+            {
+                _lastAction = result.Acted;
+            }
+
+            SetStatus(result.Error == null ? Loc.T("对话完成") : Loc.T("对话出错"));
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(Loc.T("对话已取消"));
+        }
+        catch (Exception ex)
+        {
+            AddHistory("assistant", Loc.T("请求失败：{0}", ex.Message));
+            SetStatus(Loc.T("对话失败"));
+        }
+    }
+
+    private async Task<string> TestConnectionCoreAsync(bool force, CancellationToken cancellationToken)
+    {
+        SetStatus(Loc.T("正在测试模型…会向配置的服务发送测试请求。"));
+        NoteEvent(Status);
+        try
+        {
+            var results = await _loop.TestConfiguredRolesAsync(force, cancellationToken);
+            AgentSettings settings;
+            lock (_gate)
+            {
+                settings = _settings;
+            }
+
+            foreach (var item in results)
+            {
+                ModelRoleProbe.Upsert(settings, item.Record);
+            }
+
+            SaveSettings(settings);
+            var play = results.First(item => item.Role == ModelRoleNames.Play);
+            var summary = string.Join(" ", results.Select(item => ModelRoleProbe.FormatLine(item.Record)));
+            if (play.Record.Status == "failed")
+            {
+                SetModelTestFailure(play.Record);
+                SetStatus(Loc.T("游玩模型测试失败"));
+            }
+            else if (play.Record.Status == "verified")
+            {
+                ClearModelTestFailure();
+                SetStatus(Loc.T("游玩模型连通成功（不等于工具/视觉已验证）"));
+                MarkFirstRunGuideSeen();
+            }
+            else
+            {
+                SetStatus(Loc.T("模型尚未验证"));
+            }
+
+            NoteEvent(summary);
+            return summary;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(Loc.T("连通失败"));
+            ClassifyStop(ex.Message, ModelRoleNames.Play);
+            return DiagnosticExport.Redact(ex.Message);
+        }
+    }
+
+    private async Task StepOnceCoreAsync(CancellationToken cancellationToken)
+    {
+        if (PlayRunning)
+        {
+            SetStatus(Loc.T("自动游玩中，请先暂停再单步"));
+            return;
+        }
+
+        SetStatus(Loc.T("单步决策中"));
+        try
+        {
+            await _turnGate.WaitAsync(cancellationToken);
+            AgentTurnResult result;
+            try
+            {
+                result = await _loop.PlayOnceAsync(cancellationToken);
+            }
+            finally
+            {
+                _turnGate.Release();
+            }
+
+            ApplyPlayResult(result);
+
+            // The step button spends the same session budget as auto-play. Without recording the
+            // turn here the guard's request count never grew, so repeated steps could run past the
+            // configured cap while auto-play would have stopped at it.
+            string? budgetStop;
+            lock (_gate)
+            {
+                budgetStop = _budgetGuard.Observe(result) ?? _budgetGuard.CheckBudget();
+            }
+
+            if (!string.IsNullOrWhiteSpace(budgetStop))
+            {
+                SetStop(StopKindPolicy.Budget, budgetStop, ModelRoleNames.Play);
+                SetStatus(budgetStop);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus(Loc.T("单步已取消"));
+        }
+        catch (Exception ex)
+        {
+            SetStatus(Loc.T("单步失败：{0}", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Marks the launch in-progress on the calling thread so a pending observer does not still
+    /// read DualLaunching=false or the idle DualStatus. A concurrent caller that cannot take the
+    /// gate leaves a terminal outcome untouched: rewriting Succeeded/Failed/Rejected/Canceled as
+    /// InProgress would make a finished attempt look like it never completed.
+    /// </summary>
+    private bool TryBeginDualLaunch()
+    {
+        if (!_dualLaunchGate.Wait(0))
+        {
+            return false;
+        }
+
+        _dualLaunching = true;
+        _dualStatus = Loc.T("正在检查组队条件…");
+        _dualLaunchOutcome = DualLaunchOutcome.InProgress;
+        RaiseChanged();
+        return true;
+    }
+
+    private async Task LaunchDualInstanceCoreAsync(
+        AgentSettings settings,
+        CancellationToken cancellationToken,
+        bool continueRun,
+        bool companionAutoPlay)
+    {
+        var previousConnection = LocalDualInstanceLauncher.Connection;
+        try
+        {
+            if (_teamMessagePending || _teamControlPending)
+            {
+                _dualStatus = Loc.T("请等待当前队伍消息完成，再重新组队。");
+                _dualLaunchOutcome = DualLaunchOutcome.Rejected;
+                return;
+            }
+            var screen = await new GameBridge().GetScreenAsync(cancellationToken);
+            var error = CoopLaunchPolicy.GetError(
+                InstanceRole.IsCompanion,
+                PlayRunning,
+                screen,
+                settings,
+                requireVerifiedPlayModel: companionAutoPlay);
+            if (error != null)
+            {
+                _dualStatus = error;
+                _dualLaunchOutcome = DualLaunchOutcome.Rejected;
+                return;
+            }
+
+            // The child reads settings at startup. Persist the edited model
+            // selection before launching so both windows use the same choices.
+            SaveSettings(settings);
+            _dualStatus = continueRun
+                ? Loc.T("正在继续联机存档，等待队友窗口连回…")
+                : Loc.T("正在邀请 AI 队友，等待游戏窗口连接…");
+            RaiseChanged();
+            var launchResult = continueRun
+                ? await DualInstanceCoordinator.ContinueLocalCoopResultAsync(cancellationToken, companionAutoPlay)
+                : await DualInstanceCoordinator.HostLocalCoopResultAsync(cancellationToken, companionAutoPlay);
+            _dualStatus = launchResult.Message;
+            _dualLaunchOutcome = launchResult.Ok ? DualLaunchOutcome.Succeeded : DualLaunchOutcome.Failed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _dualStatus = Loc.T("已取消等待队友连接；若队友窗口已打开，请在该窗口确认状态。");
+            _dualLaunchOutcome = DualLaunchOutcome.Canceled;
+        }
+        catch (Exception ex)
+        {
+            _dualStatus = continueRun
+                ? Loc.T("继续联机存档失败：{0}", ex.Message)
+                : Loc.T("邀请队友失败：{0}", ex.Message);
+            _dualLaunchOutcome = DualLaunchOutcome.Failed;
+        }
+        finally
+        {
+            if (!ReferenceEquals(previousConnection, LocalDualInstanceLauncher.Connection))
+            {
+                // The route belongs to the teammate session that is actually running, so it is only
+                // recorded when this attempt established a new connection. A rejected retry -- most
+                // often "the teammate window is already running" -- must not relabel a teammate that
+                // was launched the other way, or /health would tell an external agent to take over a
+                // seat that is already being played by the in-process loop.
+                _companionAutoPlay = companionAutoPlay;
+                _teamConversation.Clear();
+                _teamStatus = Loc.T("队伍对话已重置。确认队友连接后，可以商量这次冒险的打法。");
+            }
+            _dualLaunching = false;
+            _dualLaunchGate.Release();
+            RaiseChanged();
+        }
+    }
+
+    private async Task CompanionEntryAsync(CancellationToken cancellationToken)
+    {
+        var joined = await DualInstanceCoordinator.RunCompanionBootstrapAsync(cancellationToken);
+        if (!joined)
+        {
+            SetStatus(Loc.T("同伴实例加入大厅失败"));
+            return;
+        }
+        await _companionControlGate.WaitAsync(cancellationToken);
+        try
+        {
+            _companionReady = true;
+            var autoPlay = Environment.GetEnvironmentVariable("STS2_AGENT_AUTOPLAY");
+            if (!_companionAutoStartSuppressed &&
+                (string.Equals(autoPlay, "1", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(autoPlay, "true", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(autoPlay)))
+            {
+                StartAutoPlay();
+            }
+            else
+            {
+                // External-takeover launch: this process is a seat an outside agent drives. A
+                // companion window has no overlay (ModEntry skips it for companions), so the route is
+                // reported where it can actually be observed: play_phase stays "paused" with zero
+                // model requests, and the host window's dual status names the route.
+                SetStatus(Loc.T("等待外部接管：队友窗口已就绪，未自动开始游玩。"));
+                NoteEvent(Status);
+            }
+        }
+        finally { _companionControlGate.Release(); }
+    }
+
+    private async Task ObservePlayCompletionAsync(Task task, PlaySessionIdentity identity)
+    {
+        try
+        {
+            await task;
+            lock (_playLifecycleGate)
+            {
+                if (!IsCurrentPlaySessionLocked(identity)) return;
+
+                _requestingModel = false;
+                if (PlayPhase == "paused" && _stopKind == null) SetStatus(Loc.T("已暂停自动游玩"));
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (_playLifecycleGate)
+            {
+                if (!IsCurrentPlaySessionLocked(identity)) return;
+
+                Log.Warn($"{LogPrefix} Auto-play session ended: {ex.Message}");
+                ClassifyStop(ex, ModelRoleNames.Play);
+                _requestingModel = false;
+                if (PlayPhase == "paused") SetStatus(Loc.T("自动游玩已停止：{0}", DiagnosticExport.Redact(ex.Message)));
+                NoteEvent("stop " + (_stopKind ?? "failed") + ": " + ex.Message);
+            }
+        }
+    }
+
+    private async Task AutoPlayLoopAsync(CancellationToken cancellationToken)
+    {
+        var boundary = _runBoundary;
+        SessionBudgetGuard budgetGuard;
+        lock (_gate)
+        {
+            budgetGuard = _budgetGuard;
+        }
+
+        try
+        {
+            await AutoPlayRecovery.RunAsync(async token =>
+            {
+                await _turnGate.WaitAsync(token);
+                try
+                {
+                    _requestingModel = true;
+                    RaiseChanged();
+                    var snapshot = await GameThread.InvokeAsync(() =>
+                    {
+                        var payload = GameStateService.BuildStatePayload();
+                        return (payload.screen, payload.session.phase, payload.run_id, payload.in_combat);
+                    });
+                    // Do not re-arm the boundary here: replacing it before checking would clear the
+                    // "entered a run" flag that makes a return to the menu a stop. Starting auto-play
+                    // is what installs a fresh boundary (see StartAutoPlay).
+                    boundary.Check(snapshot.Item1, snapshot.Item2, snapshot.Item3);
+                    var moment = ObserveProactiveMoment(snapshot.Item1, snapshot.Item4);
+                    var immediate = await TryCompanionImmediateAsync(token);
+                    if (immediate != null)
+                    {
+                        await TryProactiveChatAsync(moment, token);
+                        return immediate;
+                    }
+
+                    SetRequestingModelStatus();
+                    var turn = await _loop.PlayOnceAsync(token, boundary.Check);
+                    await TryProactiveChatAsync(moment, token);
+                    return turn;
+                }
+                finally
+                {
+                    _requestingModel = false;
+                    _turnGate.Release();
+                }
+
+            }, ApplyPlayResult, cancellationToken, delay: null, budgetGuard: budgetGuard);
+        }
+        finally { RaiseChanged(); }
+    }
+
+    private async Task<AgentTurnResult?> TryCompanionImmediateAsync(CancellationToken cancellationToken)
+    {
+        var followMapVotes = InstanceRole.IsCompanion;
+        var decision = await GameThread.InvokeAsync(() =>
+        {
+            var payload = GameStateService.BuildStatePayload();
+            var mapOptions = payload.map?.available_nodes
+                .Select(node => new CompanionMapOption(node.index, node.vote_count, node.has_local_vote))
+                .ToArray();
+            return CompanionPlayPolicy.DecideImmediate(
+                payload.screen,
+                payload.available_actions,
+                followMapVotes ? mapOptions : null,
+                payload.modal?.type_name,
+                payload.modal?.can_confirm == true,
+                payload.modal?.can_dismiss == true,
+                payload.in_combat,
+                followMapVotes);
+        });
+
+        if (decision.Kind == CompanionImmediateDecision.Wait)
+        {
+            await Task.Delay(400, cancellationToken);
+            return new AgentTurnResult
+            {
+                Reasoning = Loc.T("等待你选择地图节点，随后投同一格。"),
+                WaitingForPlayer = true,
+                WaitingForGame = true,
+                ToolRounds = 0,
+                RequestsSpent = 0
+            };
+        }
+
+        if (decision.Kind != CompanionImmediateDecision.Act || string.IsNullOrWhiteSpace(decision.Action))
+        {
+            return null;
+        }
+
+        var acted = decision.Action;
+        var json = await GameThread.InvokeAsync(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var response = await GameActionService.ExecuteAsync(new ActionRequest
+            {
+                action = acted,
+                option_index = decision.OptionIndex,
+                client_context = new { source = "companion_follow", instance_role = InstanceRole.Current }
+            });
+            return response.message ?? response.action;
+        });
+
+        var reasoning = string.Equals(acted, "confirm_modal", StringComparison.OrdinalIgnoreCase)
+            ? Loc.T("确认阻挡操作的教学弹窗。")
+            : Loc.T("跟随你的地图选择。");
+        return new AgentTurnResult
+        {
+            Acted = acted,
+            ActResultJson = json,
+            Reasoning = reasoning,
+            ToolRounds = 0,
+            RequestsSpent = 0
+        };
+    }
+
+    private ProactiveChatMoment ObserveProactiveMoment(string? screen, bool inCombat)
+    {
+        var key = ProactiveChatPolicy.SituationKey(screen, inCombat);
+        var moment = ProactiveChatPolicy.Observe(_proactiveSituationKey, key);
+        _proactiveSituationKey = key;
+        return moment;
+    }
+
+    // Runs while the turn gate is already held: the chat call must not take it again,
+    // and a failure here must never fail the auto-play turn.
+    private async Task TryProactiveChatAsync(ProactiveChatMoment moment, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (moment == ProactiveChatMoment.None)
+            {
+                return;
+            }
+
+            bool enabled;
+            string tone;
+            string? budgetBlock;
+            lock (_gate)
+            {
+                enabled = _settings.ProactiveChatEnabled;
+                tone = _settings.ProactiveChatTone;
+                budgetBlock = _budgetGuard.CheckBudget();
+            }
+
+            // The session owns the counter and the interval stamp, so the volume bounds
+            // cannot drift from the policy.
+            var decision = _proactiveChat.Decide(enabled, PlayRunning, budgetBlock, moment, DateTimeOffset.UtcNow);
+            if (!decision.Send)
+            {
+                return;
+            }
+
+            var result = await _loop.ChatAsync(
+                ProactiveChatPolicy.BuildPrompt(moment),
+                History,
+                new ChatOptions
+                {
+                    AttachState = true,
+                    ReadOnly = true,
+                ExtraSystemInstruction = ProactiveChatTones.BuildSystemInstruction(tone)
+            },
+            cancellationToken);
+            AccountTurn(result, recordBudget: true);
+            if (result.Error != null)
+            {
+                NoteEvent("proactive chat: " + DiagnosticExport.Redact(result.Error));
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.AssistantText))
+            {
+                AddHistory("assistant", result.AssistantText);
+            }
+
+            NoteEvent("proactive chat sent (" + moment + ")");
+        }
+        catch (Exception ex)
+        {
+            NoteEvent("proactive chat skipped: " + DiagnosticExport.Redact(ex.Message));
+        }
+    }
+
+    private void ApplyMcpFromSettings()
+    {
+        var enabled = Settings.McpEnabled;
+        var url = McpEndpointUrl();
+        NativeMcpServer.Runtime?.SetEnabled(enabled, url);
+        _mcpStatus = enabled
+            ? Loc.T("MCP 已打开。把下面的地址或配置贴进外部客户端。")
+            : null;
+    }
+
+    private static string McpEndpointUrl()
+    {
+        return HttpServer.Instance.Prefix.TrimEnd('/') + "/mcp";
+    }
+
+    private void AccountTurn(AgentTurnResult result, bool recordBudget = false)
+    {
+        lock (_gate)
+        {
+            if (result.Usage != null)
+            {
+                _sessionUsage = LlmUsage.Combine(_sessionUsage, result.Usage) ?? LlmUsage.Empty;
+                _sessionUsageKnown = true;
+            }
+
+            _sessionRequests += Math.Max(0, result.RequestsSpent);
+            if (recordBudget)
+            {
+                _budgetGuard.Observe(result);
+            }
+        }
+    }
+
+    private void ApplyPlayResult(AgentTurnResult result)
+    {
+        AccountTurn(result);
+        _waitingForGame = result.WaitingForGame;
+        _waitingForPlayer = result.WaitingForPlayer;
+        _requestingModel = false;
+
+        if (!string.IsNullOrWhiteSpace(result.Acted))
+        {
+            _lastAction = result.Acted;
+            RecordDecision(
+                "agent_loop",
+                result.Acted,
+                result.Reasoning,
+                result.StateFingerprint,
+                result.RequestsSpent,
+                result.Usage?.TotalTokens);
+        }
+
+        _lastThought = result.Reasoning ?? result.AssistantText ?? _lastThought;
+        if (!string.IsNullOrWhiteSpace(result.AssistantText))
+        {
+            AddHistory("assistant", result.AssistantText);
+        }
+
+        if (result.RequiresConfiguration)
+        {
+            ClassifyStop(result.Error ?? Loc.T("配置错误"), ModelRoleNames.Play);
+        }
+
+            SetStatus(result.Error == null
+            ? (result.Acted != null ? Loc.T("已执行 {0}", result.Acted) : result.WaitingForGame ? Loc.T("等待游戏可操作") : Loc.T("等待可操作状态"))
+            : DiagnosticExport.Redact(result.Error));
+    }
+
+    public PlayerFacingView PlayerFacing()
+    {
+        string? budget;
+        lock (_gate)
+        {
+            budget = _budgetGuard.CheckBudget();
+        }
+
+        return PlayerFacingSession.Compose(new PlayerFacingSnapshot
+        {
+            FirstRun = FirstRunSetup.Evaluate(Settings),
+            PlayPhase = PlayPhase,
+            PlayRunning = PlayRunning,
+            Status = Status,
+            DualLaunching = DualLaunching,
+            DualStatus = DualStatus,
+            TeamControlPending = TeamControlPending,
+            TeamControlStatus = TeamControlStatus,
+            CompanionConnected = LocalDualInstanceLauncher.Connection != null,
+            CompanionProcessAlive = LocalDualInstanceLauncher.CompanionProcessAlive,
+            CompanionProcessExited = LocalDualInstanceLauncher.CompanionProcessExited,
+            WaitingForGame = _waitingForGame,
+            WaitingForPlayer = _waitingForPlayer,
+            RequestingModel = _requestingModel || _requestingModelStatus,
+            FinishingSubmittedAction = PlayPhase == "stopping",
+            StopKind = _stopKind,
+            StopDetail = _stopDetail,
+            UsageKnown = _sessionUsageKnown,
+            SessionUsage = SessionUsage,
+            SessionRequests = SessionRequests,
+            BudgetReason = budget,
+            IsCompanion = InstanceRole.IsCompanion
+        });
+    }
+
+    public string ExportDiagnostics()
+    {
+        IReadOnlyList<string> events;
+        lock (_gate)
+        {
+            events = _diagnosticEvents.ToArray();
+        }
+
+        return DiagnosticExport.Render(new DiagnosticSnapshot
+        {
+            ModVersion = Router.ModVersion,
+            Role = InstanceRole.Current,
+            PlayPhase = PlayPhase,
+            Status = Status,
+            DualStatus = DualStatus,
+            TeamControlStatus = TeamControlStatus,
+            StopKind = _stopKind,
+            StopDetail = _stopDetail,
+            ApiPrefix = HttpServer.Instance.Prefix,
+            McpUrl = McpUrl,
+            McpEnabled = McpRunning,
+            UsageKnown = _sessionUsageKnown,
+            SessionRequests = SessionRequests,
+            SessionTokens = _sessionUsageKnown ? SessionUsage.TotalTokens : null,
+            RecentEvents = events,
+            RecentRequestIds = Router.RecentRequestIds(),
+            Settings = Settings
+        });
+    }
+
+    public bool SessionUsageKnown
+    {
+        get { lock (_gate) return _sessionUsageKnown; }
+    }
+
+    private void SetModelTestFailure(ModelRoleTestRecord record)
+    {
+        _stopKind = ModelRoleProbe.FailureKind(record.StatusCode, record.Error);
+        _stopDetail = DiagnosticExport.Redact(record.Error);
+        _stopRole = record.Role;
+    }
+
+    private void ClearModelTestFailure()
+    {
+        if (PlayerFacingSession.ShouldClearModelTestFailure(_stopKind, _stopRole, ModelRoleNames.Play))
+        {
+            _stopKind = null;
+            _stopDetail = null;
+            _stopRole = null;
+        }
+    }
+
+    private void ClassifyStop(string message, string? role = null)
+    {
+        SetStop(StopKindPolicy.Classify(message), message, role);
+    }
+
+    private void ClassifyStop(Exception error, string? role = null)
+    {
+        var kind = error is AutoPlayStoppedException stopped
+            ? StopKindPolicy.Resolve(stopped.Kind, error.Message)
+            : StopKindPolicy.Classify(error.Message);
+        SetStop(kind, error.Message, role);
+    }
+
+    private void SetStop(string kind, string message, string? role)
+    {
+        _stopKind = kind;
+        _stopDetail = DiagnosticExport.Redact(message);
+        _stopRole = role;
+    }
+
+    private bool IsCurrentPlaySessionLocked(PlaySessionIdentity identity)
+    {
+        return PlayerFacingSession.IsCurrentPlaySession(_playSessionIdentity, identity);
+    }
+
+    private void NoteEvent(string line)
+    {
+        lock (_gate)
+        {
+            _diagnosticEvents.Add(DateTimeOffset.UtcNow.ToString("HH:mm:ss") + " " + DiagnosticExport.Redact(line));
+            if (_diagnosticEvents.Count > 24)
+            {
+                _diagnosticEvents.RemoveRange(0, _diagnosticEvents.Count - 24);
+            }
+        }
+    }
+
+    private void AddHistory(string role, string text)
+    {
+        lock (_gate)
+        {
+            _history.Add(new ChatTurn { Role = role, Text = text });
+            if (_history.Count > 80)
+            {
+                _history.RemoveRange(0, _history.Count - 80);
+            }
+        }
+
+        RaiseChanged();
+    }
+
+    private void AppendLog(string line)
+    {
+        Log.Info($"{LogPrefix} {line}");
+    }
+
+    public void NotifyStatus(string status) => SetStatus(status);
+
+    private void SetStatus(string status)
+    {
+        _status = status;
+        _requestingModelStatus = false;
+        RaiseChanged();
+    }
+
+    // The status line is the only player-visible record that a model request is in flight, and the
+    // chat path never sets _requestingModel, so the flag is kept next to the text it belongs to.
+    private void SetRequestingModelStatus()
+    {
+        _status = Loc.T("正在请求模型…");
+        _requestingModelStatus = true;
+        RaiseChanged();
+    }
+
+    private void RaiseChanged()
+    {
+        Changed?.Invoke();
+    }
+}

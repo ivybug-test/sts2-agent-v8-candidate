@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+from unittest.mock import patch
+
+import sts2_mcp.game_data as game_data_module
+import sts2_mcp.server as server_module
+from sts2_mcp.client import Sts2ApiError
+from sts2_mcp.game_data import get_game_data_items_fields
+from sts2_mcp.server import create_server
+
+# Independent snapshots of the scene field sets, deliberately spelled out as literals.
+# Deriving them from _SCENE_FIELD_SETS would make every assertion below self-referential:
+# editing the table would also edit the expectation, so a wrong or missing field could
+# never turn a test red. tests/test_scene_field_alignment.py pins these same fields to the
+# C# GameDataFilter.SceneFieldSets, so a real table change has to update all three places.
+_COMBAT_CARD_FIELDS = (
+    "id,name,description,type,rarity,target,cost,is_x_cost,star_cost,is_x_star_cost,"
+    "damage,block,keywords,tags,vars,upgrade"
+)
+_SHOP_CARD_FIELDS = (
+    "id,name,description,type,rarity,target,cost,is_x_cost,star_cost,is_x_star_cost,keywords"
+)
+_EVENT_FIELDS = "id,name,type,act,description,options"
+
+
+class DummyClient:
+    def __init__(self, screen: str = "MAIN_MENU", game_data: dict[str, object] | None = None) -> None:
+        self._screen = screen
+        self._game_data = game_data or {}
+        self.game_data_calls: list[str] = []
+
+    def get_health(self) -> dict:
+        return {"ok": True}
+
+    def get_state(self) -> dict:
+        return {"screen": self._screen, "available_actions": []}
+
+    def get_available_actions(self) -> list[dict]:
+        return []
+
+    def wait_for_event(self, *, event_names=None, timeout=0.0) -> dict | None:
+        return None
+
+    def execute_action(self, *args, **kwargs) -> dict:
+        return {"ok": True}
+
+    def get_game_data_collection(self, collection: str) -> object:
+        self.game_data_calls.append(collection)
+        if collection not in self._game_data:
+            raise Sts2ApiError(status_code=404, code="collection_not_found", message=f"Unknown collection: {collection}")
+        return self._game_data[collection]
+
+
+class GameDataToolsTests(unittest.TestCase):
+    def test_get_game_data_item_returns_none_for_empty_item_id(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_item"))
+
+        result = tool.fn(collection="cards", item_id="")
+
+        self.assertIsNone(result)
+
+    def test_get_game_data_item_supports_case_insensitive_lookup(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_item"))
+        abrasive = {"id": "ABRASIVE", "name": "Abrasive"}
+
+        with patch("sts2_mcp.server._ensure_game_data_index", return_value={"ABRASIVE": abrasive}):
+            result = tool.fn(collection="cards", item_id="abrasive")
+
+        self.assertEqual(result, abrasive)
+
+    def test_get_game_data_items_returns_batch_result(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_items"))
+        abrasive = {"id": "ABRASIVE", "name": "Abrasive"}
+        jolt = {"id": "JOLT", "name": "Jolt"}
+
+        with patch("sts2_mcp.server._ensure_game_data_index", return_value={"ABRASIVE": abrasive, "JOLT": jolt}):
+            result = tool.fn(collection="cards", item_ids="abrasive, jolt, unknown")
+
+        self.assertEqual(result["abrasive"], abrasive)
+        self.assertEqual(result["jolt"], jolt)
+        self.assertIsNone(result["unknown"])
+
+    def test_get_game_data_items_returns_empty_when_item_ids_is_empty(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_items"))
+
+        result = tool.fn(collection="cards", item_ids="")
+
+        self.assertEqual(result, {})
+
+    def test_get_game_data_items_returns_structured_error_for_unknown_collection(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_items"))
+
+        with patch(
+            "sts2_mcp.server._ensure_game_data_index",
+            side_effect=KeyError("Unknown game data collection: unknown"),
+        ):
+            result = tool.fn(collection="unknown", item_ids="ABRASIVE")
+
+        self.assertIn("error", result)
+        self.assertEqual(result["error"]["type"], "unknown_collection")
+        self.assertEqual(result["error"]["collection"], "unknown")
+
+    def test_get_game_data_item_returns_structured_error_for_unknown_collection(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_item"))
+
+        with patch(
+            "sts2_mcp.server._ensure_game_data_index",
+            side_effect=KeyError("Unknown game data collection: unknown"),
+        ):
+            result = tool.fn(collection="unknown", item_id="ABRASIVE")
+
+        self.assertIn("error", result)
+        self.assertEqual(result["error"]["type"], "unknown_collection")
+        self.assertEqual(result["error"]["collection"], "unknown")
+
+    def test_get_relevant_game_data_uses_scene_fields_for_combat(self) -> None:
+        client = DummyClient(screen="COMBAT_REWARD")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        expected = {"ABRASIVE": {"id": "ABRASIVE"}}
+        expected_fields = _COMBAT_CARD_FIELDS
+
+        with patch(
+            "sts2_mcp.server.get_game_data_items_fields",
+            return_value=expected,
+        ) as get_game_data_items_fields_mock:
+            result = tool.fn(collection="cards", item_ids="ABRASIVE")
+
+        self.assertEqual(result, expected)
+        get_game_data_items_fields_mock.assert_called_once_with(
+            collection="cards",
+            item_ids="ABRASIVE",
+            fields=expected_fields,
+        )
+
+    def test_get_relevant_game_data_uses_scene_fields_for_shop(self) -> None:
+        client = DummyClient(screen="SHOP")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        expected = {"JOLT": {"id": "JOLT"}}
+        expected_fields = _SHOP_CARD_FIELDS
+
+        with patch(
+            "sts2_mcp.server.get_game_data_items_fields",
+            return_value=expected,
+        ) as get_game_data_items_fields_mock:
+            result = tool.fn(collection="cards", item_ids="JOLT")
+
+        self.assertEqual(result, expected)
+        get_game_data_items_fields_mock.assert_called_once_with(
+            collection="cards",
+            item_ids="JOLT",
+            fields=expected_fields,
+        )
+
+    def test_get_relevant_game_data_uses_scene_fields_for_event(self) -> None:
+        client = DummyClient(screen="EVENT_ROOM")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        expected = {"MYSTERY": {"id": "MYSTERY"}}
+        expected_fields = _EVENT_FIELDS
+
+        with patch(
+            "sts2_mcp.server.get_game_data_items_fields",
+            return_value=expected,
+        ) as get_game_data_items_fields_mock:
+            result = tool.fn(collection="events", item_ids="MYSTERY")
+
+        self.assertEqual(result, expected)
+        get_game_data_items_fields_mock.assert_called_once_with(
+            collection="events",
+            item_ids="MYSTERY",
+            fields=expected_fields,
+        )
+
+    def test_get_relevant_game_data_falls_back_when_scene_has_no_field_set(self) -> None:
+        client = DummyClient(screen="MAIN_MENU")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        event_item = {"id": "MYSTERY", "name": "Mystery Event"}
+
+        with patch("sts2_mcp.server._ensure_game_data_index", return_value={"MYSTERY": event_item}):
+            with patch("sts2_mcp.server.get_game_data_items_fields") as get_game_data_items_fields_mock:
+                result = tool.fn(collection="events", item_ids="MYSTERY")
+
+        self.assertEqual(result, {"MYSTERY": event_item})
+        get_game_data_items_fields_mock.assert_not_called()
+
+    def test_get_relevant_game_data_falls_back_when_collection_has_no_scene_field_set(self) -> None:
+        client = DummyClient(screen="COMBAT_REWARD")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        event_item = {"id": "MYSTERY", "name": "Mystery Event"}
+
+        with patch("sts2_mcp.server._ensure_game_data_index", return_value={"MYSTERY": event_item}):
+            with patch("sts2_mcp.server.get_game_data_items_fields") as get_game_data_items_fields_mock:
+                result = tool.fn(collection="events", item_ids="MYSTERY")
+
+        self.assertEqual(result, {"MYSTERY": event_item})
+        get_game_data_items_fields_mock.assert_not_called()
+
+    def test_get_relevant_game_data_event_scene_keeps_name_field_from_real_schema(self) -> None:
+        client = DummyClient(screen="EVENT_ROOM")
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+        event_item = {
+            "id": "MYSTERY",
+            "name": "Mystery Event",
+            "description": "A strange encounter.",
+            "options": [{"id": "LEAVE"}],
+            "type": "Event",
+        }
+
+        with patch("sts2_mcp.game_data._ensure_game_data_index", return_value={"MYSTERY": event_item}):
+            result = tool.fn(collection="events", item_ids="MYSTERY")
+
+        self.assertEqual(
+            result["MYSTERY"],
+            {
+                "id": "MYSTERY",
+                "name": "Mystery Event",
+                "type": "Event",
+                "description": "A strange encounter.",
+                "options": [{"id": "LEAVE"}],
+            },
+        )
+        self.assertNotIn("title", result["MYSTERY"])
+        # act is in the event field set but absent from this item, so it is still dropped.
+        self.assertNotIn("act", result["MYSTERY"])
+
+    def test_get_game_data_items_fields_filters_fields(self) -> None:
+        with patch(
+            "sts2_mcp.game_data._ensure_game_data_index",
+            return_value={
+                "ABRASIVE": {"id": "ABRASIVE", "name": "Abrasive", "cost": 2},
+                "JOLT": {"id": "JOLT", "name": "Jolt", "cost": 1},
+            },
+        ):
+            result = get_game_data_items_fields(
+                collection="cards",
+                item_ids="ABRASIVE, JOLT, UNKNOWN",
+                fields="id,name",
+            )
+
+        self.assertEqual(result["ABRASIVE"], {"id": "ABRASIVE", "name": "Abrasive"})
+        self.assertEqual(result["JOLT"], {"id": "JOLT", "name": "Jolt"})
+        self.assertIsNone(result["UNKNOWN"])
+
+    def test_get_game_data_items_fields_returns_full_item_when_fields_empty_or_none(self) -> None:
+        payload = {
+            "ABRASIVE": {"id": "ABRASIVE", "name": "Abrasive", "cost": 2},
+        }
+        with patch("sts2_mcp.game_data._ensure_game_data_index", return_value=payload):
+            result_with_empty_fields = get_game_data_items_fields(
+                collection="cards",
+                item_ids="ABRASIVE",
+                fields="",
+            )
+            result_with_none_fields = get_game_data_items_fields(
+                collection="cards",
+                item_ids="ABRASIVE",
+                fields=None,
+            )
+
+        self.assertEqual(result_with_empty_fields["ABRASIVE"], payload["ABRASIVE"])
+        self.assertEqual(result_with_none_fields["ABRASIVE"], payload["ABRASIVE"])
+
+    def test_get_game_data_item_loads_collection_once(self) -> None:
+        client = DummyClient(
+            game_data={
+                "cards": [
+                    {"id": "ABRASIVE", "name": "Abrasive"},
+                ]
+            }
+        )
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_item"))
+
+        first = tool.fn(collection="cards", item_id="ABRASIVE")
+        second = tool.fn(collection="cards", item_id="abrasive")
+
+        self.assertEqual(first["id"], "ABRASIVE")
+        self.assertEqual(second["id"], "ABRASIVE")
+        self.assertEqual(client.game_data_calls, ["cards"])
+
+    def test_get_game_data_item_returns_structured_error_when_mod_data_unavailable(self) -> None:
+        client = DummyClient()
+        server = create_server(client=client)
+        tool = asyncio.run(server.get_tool("get_game_data_item"))
+
+        with patch(
+            "sts2_mcp.server._ensure_game_data_index",
+            side_effect=RuntimeError("connection_error: Cannot reach STS2 mod"),
+        ):
+            result = tool.fn(collection="cards", item_id="ABRASIVE")
+
+        self.assertEqual(result["error"]["type"], "game_data_unavailable")
+        self.assertEqual(result["error"]["collection"], "cards")
+
+    def test_ensure_game_data_index_supports_case_insensitive_lookup_for_dict_collection(self) -> None:
+        with patch.object(game_data_module, "_GAME_DATA_COLLECTIONS", {}), patch.object(game_data_module, "_GAME_DATA_INDEXES", {}):
+            with patch(
+                "sts2_mcp.game_data._load_game_data_collection",
+                return_value={"ABRASIVE": {"id": "ABRASIVE", "name": "Abrasive"}},
+            ):
+                index = game_data_module._ensure_game_data_index("cards")
+
+        self.assertEqual(index["ABRASIVE"]["id"], "ABRASIVE")
+        self.assertEqual(index["abrasive"]["id"], "ABRASIVE")
+        self.assertEqual(game_data_module._lookup_game_data_item(index=index, item_id="Abrasive")["id"], "ABRASIVE")
+
+    def test_game_data_errors_carry_the_same_envelope_fields_as_action_errors(self) -> None:
+        """The play skill branches on error.code/retryable/status_code for any failed call.
+
+        Actions raise the mod's envelope straight through, so those three fields are present,
+        but game-data tools answer with an error object instead of raising. They used to carry
+        only type/collection/message, which made the skill's instruction silently false on this
+        one path.
+        """
+        client = DummyClient()
+        server = create_server(client=client)
+        item_tool = asyncio.run(server.get_tool("get_game_data_item"))
+        items_tool = asyncio.run(server.get_tool("get_game_data_items"))
+        relevant_tool = asyncio.run(server.get_tool("get_relevant_game_data"))
+
+        with patch("sts2_mcp.server._ensure_game_data_index", side_effect=KeyError("nope")):
+            unknown = item_tool.fn(collection="cards", item_id="ABRASIVE")
+
+        with patch(
+            "sts2_mcp.server._ensure_game_data_index",
+            side_effect=game_data_module.GameDataUnavailableError(
+                "boom", code="mod_unreachable", status_code=503, retryable=True),
+        ):
+            unavailable = items_tool.fn(collection="cards", item_ids="ABRASIVE")
+            # The ids are explicit here: an empty id list short-circuits before the index is
+            # built, and this case is about what a failed load reports.
+            relevant = relevant_tool.fn(collection="cards", item_ids="ABRASIVE")
+
+        for result in (unknown, unavailable, relevant):
+            error = result["error"]
+            for field in ("code", "status_code", "retryable", "type", "collection", "message"):
+                self.assertIn(field, error, f"{field} missing from {error!r}")
+
+        self.assertEqual(unknown["error"]["code"], "collection_not_found")
+        self.assertEqual(unknown["error"]["status_code"], 404)
+        self.assertIs(unknown["error"]["retryable"], False)
+
+        # A mod-side failure keeps what the mod said, so a caller can retry on the mod's terms.
+        self.assertEqual(unavailable["error"]["code"], "mod_unreachable")
+        self.assertEqual(unavailable["error"]["status_code"], 503)
+        self.assertIs(unavailable["error"]["retryable"], True)
+
+
+if __name__ == "__main__":
+    unittest.main()
