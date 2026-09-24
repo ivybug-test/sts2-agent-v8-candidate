@@ -416,19 +416,19 @@ internal static partial class GameStateService
 
     private static int GetStartRunLobbyMaxPlayers(StartRunLobby lobby)
     {
-        return StartRunLobbyMaxPlayersField?.GetValue(lobby) is int parsed ? parsed : 0;
+        return lobby.MaxPlayers;
     }
 
     public static void EnsureFourPlayerLobby()
     {
         var scene = GetMultiplayerTestScene();
         var lobby = scene != null ? GetMultiplayerTestLobby(scene) : GetCharacterSelectScreen(ActiveScreenContext.Instance.GetCurrentScreen())?.Lobby;
-        if (lobby == null || StartRunLobbyMaxPlayersField == null)
+        if (lobby == null || StartRunLobbyMaxPlayersSetter == null)
         {
             return;
         }
 
-        StartRunLobbyMaxPlayersField.SetValue(lobby, CoopLaunchPolicy.MaxLobbyPlayers);
+        StartRunLobbyMaxPlayersSetter.Invoke(lobby, new object[] { CoopLaunchPolicy.MaxLobbyPlayers });
     }
 
     public static NMultiplayerTestCharacterPaginator? GetMultiplayerTestCharacterPaginator(NMultiplayerTest scene)

@@ -88,8 +88,8 @@ internal static partial class GameStateService
 
     private static bool _crystalSphereButtonLookupWarningLogged;
 
-    private static FieldInfo? StartRunLobbyMaxPlayersField =>
-        ReflectedGameMembers.Field(typeof(StartRunLobby), "_maxPlayers");
+    private static MethodInfo? StartRunLobbyMaxPlayersSetter =>
+        ReflectedGameMembers.Method(typeof(StartRunLobby), "set_MaxPlayers");
 
     public static GameStatePayload BuildStatePayload()
     {
