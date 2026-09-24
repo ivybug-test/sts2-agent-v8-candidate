@@ -230,7 +230,7 @@ internal static partial class GameStateService
             ResetCombatActionReadiness();
             reason = "not_player_action_phase";
         }
-        else if (!IsCombatActionSnapshotStable(combatState, me!))
+        else if (!IsCombatActionSnapshotStable(combatState, me!, actionsSettled))
         {
             reason = "snapshot_stabilizing";
         }
@@ -261,9 +261,12 @@ internal static partial class GameStateService
         };
     }
 
-    private static bool IsCombatActionSnapshotStable(CombatState combatState, Player me)
+    private static bool IsCombatActionSnapshotStable(CombatState combatState, Player me, bool actionsSettled)
     {
-        if (!GameActionService.AreGameActionsSettled())
+        // A queue can contain future actions that are not ready to execute while
+        // the player is acting. Reuse the gate's settled result so this sampler
+        // does not turn a playable combat snapshot into a permanent wait.
+        if (!actionsSettled)
         {
             ResetCombatActionReadiness();
             return false;

@@ -103,7 +103,7 @@ internal static class GameStateCombatGateContractTests
             "IsCombatActionSnapshotCurrentlyStable must not come back; readiness reads the gate.");
 
         // The gate is the one place the sampler advances, and it keeps every lock readiness reports.
-        Assert.Contains("IsCombatActionSnapshotStable(combatState,me!)", gate, StringComparison.Ordinal);
+        Assert.Contains("IsCombatActionSnapshotStable(combatState,me!,actionsSettled)", gate, StringComparison.Ordinal);
         foreach (var reason in new[]
                  {
                      "\"modal_open\"",
