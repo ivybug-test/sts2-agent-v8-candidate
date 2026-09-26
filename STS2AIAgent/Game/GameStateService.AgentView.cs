@@ -539,6 +539,7 @@ internal static partial class GameStateService
             potions = shop.potions.Select(potion => new
             {
                 i = potion.index,
+                potion_id = potion.potion_id,
                 line = FormatShopPotionLine(potion),
                 affordable = potion.enough_gold,
                 stocked = potion.is_stocked
