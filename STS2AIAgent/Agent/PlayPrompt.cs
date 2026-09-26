@@ -84,7 +84,9 @@ Omit unused parameters; keep "reason" -- it is shown to the player. Do not wrap 
         builder.AppendLine();
         builder.AppendLine(PlayContract.Trim());
         builder.AppendLine();
-        builder.AppendLine(ScreenPlaybooks.Trim());
+        // Keep the embedded Markdown's final LF; trimming it breaks the
+        // shared prompt contract on Windows, where AppendLine emits CRLF.
+        builder.Append(ScreenPlaybooks);
         builder.AppendLine();
         builder.Append("Each play step: inspect state (and metadata if needed), then call act exactly once, attaching a one-sentence reason the player can read. Vision is optional; legality still comes from live state.");
         return builder.ToString();

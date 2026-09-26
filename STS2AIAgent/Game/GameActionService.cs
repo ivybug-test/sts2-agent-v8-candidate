@@ -201,28 +201,6 @@ internal static partial class GameActionService
         return true;
     }
 
-    internal static bool AreGameActionsSettled()
-    {
-        if (RunManager.Instance.ActionExecutor.CurrentlyRunningAction != null)
-        {
-            return false;
-        }
-
-        try
-        {
-            if (!RunManager.Instance.ActionQueueSet.IsEmpty)
-            {
-                return false;
-            }
-
-            return RunManager.Instance.ActionQueueSet.GetReadyAction() == null;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
     private static bool IsStableScreenState(IScreenContext? currentScreen, bool allowMapScreen)
     {
         var screen = GameStateService.ResolveScreen(currentScreen);
