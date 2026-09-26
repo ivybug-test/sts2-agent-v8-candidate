@@ -580,7 +580,7 @@ internal static partial class GameStateService
             costs_x = card.EnergyCost.CostsX,
             star_costs_x = card.HasStarCostX,
             energy_cost = card.EnergyCost.GetWithModifiers(CostModifiers.All),
-            star_cost = Math.Max(0, card.GetStarCostWithModifiers()),
+            star_cost = card.HasStarCostX ? 0 : Math.Max(0, card.GetStarCostWithModifiers()),
             rules_text = GetCardRulesText(card),
             resolved_rules_text = resolvedRulesText,
             dynamic_values = dynamicValues

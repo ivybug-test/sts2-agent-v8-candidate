@@ -30,6 +30,7 @@ internal static class SourceCoverageTests
         "STS2AIAgent/Game/GameStateService.Combat.cs",
         "STS2AIAgent/Game/GameStateService.Map.cs",
         "STS2AIAgent/Game/GameStateService.Menus.cs",
+        "STS2AIAgent/Game/GameStateService.Compendium.cs",
         "STS2AIAgent/Game/GameStateService.Potions.cs",
         "STS2AIAgent/Game/GameStateService.Rewards.cs",
         "STS2AIAgent/Game/GameStateService.Rooms.cs",

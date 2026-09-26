@@ -241,6 +241,7 @@
 | `unlock` | object \| null | 解锁覆盖层状态（仅解锁覆盖层存在） |
 | `bundles` | object[] \| null | 卡包选择（仅出现卡包时存在） |
 | `capstone` | object \| null | 决策型覆盖层的选项集（仅该覆盖层存在；暂停菜单与其页面**不**在此列） |
+| `compendium` | object \| null | 百科或卡牌图鉴快照：`page`、`buttons[]`、`cards[]`（当前渲染窗口）、`catalog_cards[]`（当前筛选结果的原版及可升级副本）、`catalog_count`、`catalog_truncated`、`catalog_errors[]`、`scrolls[]`。`catalog_cards` 来自图鉴网格的完整筛选结果，可能包含尚未发现的卡牌；逐卡读取失败记录在 `catalog_errors[]`。 |
 | `modal` | object \| null | 阻塞弹窗状态（仅 MODAL 界面存在） |
 | `game_over` | object \| null | 游戏结束状态（仅 GAME_OVER 界面存在） |
 | `agent_view` | object \| null | 同一份状态的紧凑文本化改写，仅在请求时附带；见「compact `agent_view`」一节 |
@@ -1449,6 +1450,9 @@ compact 不是 `/state` 的子集，**很多键换了名字**。MCP `get_game_st
 - `save_and_quit` — 保存并退出
 - `open_character_select` — 打开角色选择
 - `open_timeline` — 打开时间线
+- `open_compendium` — 从主菜单打开百科
+- `open_card_library` — 从百科打开卡牌图鉴
+- `press_compendium_button` — 点击当前卡牌图鉴内可见按钮（`option_index` = `compendium.buttons[].index`）
 - `confirm_unlock` — 确认解锁弹窗
 - `close_main_menu_submenu` — 关闭主菜单子菜单（也关闭补丁说明页 `PATCH_NOTES`）
 - `choose_timeline_epoch` — 选择时间线纪元（`option_index` = `timeline.slots[].index`）

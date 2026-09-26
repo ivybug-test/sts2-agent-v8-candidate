@@ -131,6 +131,8 @@ internal sealed class GameStatePayload
 
     public object? capstone { get; init; }
 
+    public object? compendium { get; init; }
+
     public ModalPayload? modal { get; init; }
 
     public GameOverPayload? game_over { get; init; }

@@ -480,6 +480,32 @@ internal static partial class GameStateService
         return timelineButton != null && timelineButton.IsVisibleInTree() && timelineButton.IsEnabled;
     }
 
+    public static bool CanOpenCompendium(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NMainMenu mainMenu || !mainMenu.IsVisibleInTree() ||
+            mainMenu.SubmenuStack?.SubmenusOpen == true)
+        {
+            return false;
+        }
+        var button = GetMainMenuCompendiumButton(mainMenu);
+        return button != null && button.IsVisibleInTree() && button.IsEnabled;
+    }
+
+    public static bool CanOpenCardLibrary(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCompendiumSubmenu compendium || !compendium.IsVisibleInTree())
+        {
+            return false;
+        }
+        return GetSubmenuStack(compendium) != null && GetCompendiumButtons(currentScreen).Any(button =>
+            button.Name.ToString().Contains("CardLibrary", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static bool CanPressCompendiumButton(IScreenContext? currentScreen)
+    {
+        return currentScreen is NCardLibrary && GetCompendiumButtons(currentScreen).Count > 0;
+    }
+
     public static bool CanCloseMainMenuSubmenu(IScreenContext? currentScreen)
     {
         if (currentScreen is NPatchNotesScreen patchNotes)
