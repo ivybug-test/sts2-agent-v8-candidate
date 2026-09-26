@@ -24,6 +24,7 @@ using MegaCrit.Sts2.Core.Nodes.Events.Custom;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardLibrary;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
 using MegaCrit.Sts2.Core.Nodes.Screens.GameOverScreen;
@@ -71,6 +72,95 @@ namespace STS2AIAgent.Game;
 /// </remarks>
 internal static partial class GameActionService
 {
+    private static async Task<ActionResponsePayload> ExecuteOpenCompendiumAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+        if (currentScreen is not NMainMenu mainMenu || !GameStateService.CanOpenCompendium(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.",
+                new { action = "open_compendium", screen });
+        }
+
+        mainMenu.SubmenuStack.PushSubmenuType<NCompendiumSubmenu>();
+        var stable = await WaitForMainMenuSubmenuOpenAsync<NCompendiumSubmenu>(mainMenu, TimeSpan.FromSeconds(10));
+        return new ActionResponsePayload
+        {
+            action = "open_compendium",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecuteOpenCardLibraryAsync()
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+        if (!GameStateService.CanOpenCardLibrary(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.",
+                new { action = "open_card_library", screen });
+        }
+        var stack = GameStateService.GetSubmenuStack((Node)currentScreen!)
+            ?? throw new ApiException(503, "state_unavailable", "Compendium submenu stack is unavailable.",
+                new { action = "open_card_library", screen }, retryable: true);
+        stack.PushSubmenuType<NCardLibrary>();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < deadline && ActiveScreenContext.Instance.GetCurrentScreen() is not NCardLibrary)
+        {
+            await WaitForNextFrameAsync();
+        }
+        var stable = ActiveScreenContext.Instance.GetCurrentScreen() is NCardLibrary;
+        return new ActionResponsePayload
+        {
+            action = "open_card_library",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
+    private static async Task<ActionResponsePayload> ExecutePressCompendiumButtonAsync(ActionRequest request)
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+        if (!GameStateService.CanPressCompendiumButton(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.",
+                new { action = "press_compendium_button", screen });
+        }
+        var buttons = GameStateService.GetCompendiumButtons(currentScreen);
+        if (request.option_index is not int index || index < 0 || index >= buttons.Count)
+        {
+            throw new ApiException(400, "invalid_request", "A visible compendium button index is required.",
+                new { action = "press_compendium_button", screen });
+        }
+        var before = System.Text.Json.JsonSerializer.Serialize(GameStateService.BuildStatePayload().compendium);
+        buttons[index].ForceClick();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        bool stable = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+            if (System.Text.Json.JsonSerializer.Serialize(GameStateService.BuildStatePayload().compendium) != before)
+            {
+                stable = true;
+                break;
+            }
+        }
+        return new ActionResponsePayload
+        {
+            action = "press_compendium_button",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
     private static async Task<ActionResponsePayload> ExecuteCloseMainMenuSubmenuAsync()
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();

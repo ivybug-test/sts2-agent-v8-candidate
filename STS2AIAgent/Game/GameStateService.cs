@@ -124,6 +124,7 @@ internal static partial class GameStateService
         var reward = BuildRewardPayload(currentScreen);
         var bundles = BuildBundlePayload(currentScreen);
         var capstone = BuildCapstonePayload(currentScreen);
+        var compendium = BuildCompendiumPayload(currentScreen);
         var modal = BuildModalPayload(currentScreen);
         var gameOver = BuildGameOverPayload(currentScreen, runState);
 
@@ -154,6 +155,7 @@ internal static partial class GameStateService
             reward = reward,
             bundles = bundles,
             capstone = capstone,
+            compendium = compendium,
             modal = modal,
             game_over = gameOver,
             agent_view = BuildAgentViewPayload(
@@ -370,6 +372,21 @@ internal static partial class GameStateService
                 requires_target = false,
                 requires_index = false
             });
+        }
+
+        if (CanOpenCompendium(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor { name = "open_compendium", requires_target = false, requires_index = false });
+        }
+
+        if (CanOpenCardLibrary(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor { name = "open_card_library", requires_target = false, requires_index = false });
+        }
+
+        if (CanPressCompendiumButton(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor { name = "press_compendium_button", requires_target = false, requires_index = true });
         }
 
         if (CanCloseMainMenuSubmenu(currentScreen))
