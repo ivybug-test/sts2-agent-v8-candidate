@@ -29,6 +29,8 @@ internal sealed class GameEventService
 
     public static GameEventService Instance => LazyInstance.Value;
 
+    public bool HasSubscribers => _subscribers.Count > 0;
+
     private GameEventService()
     {
         var pollMs = DefaultPollIntervalMs;
@@ -98,6 +100,60 @@ internal sealed class GameEventService
                 total_tokens = entry.total_tokens,
                 timestamp_utc = entry.timestamp
             });
+        }
+    }
+
+    /// <summary>Publish one resolved game-history entry without suppressing identical repeats.</summary>
+    public void PublishCombatHistory(
+        string entryType, string runId, int? actIndex, int? floor, int? turn,
+        IReadOnlyDictionary<string, object?> facts)
+    {
+        lock (_gate)
+        {
+            if (_subscribers.Count == 0)
+            {
+                return;
+            }
+
+            // Two identical draws or hits are two real events. The state-event repeat guard must
+            // not collapse them into one observation.
+            var staleCount = _subscribers.Publish(BuildEnvelope("combat_history_entry", new
+            {
+                schema_version = 1,
+                entry_type = entryType,
+                run_id = runId,
+                act_index = actIndex,
+                floor,
+                turn,
+                facts
+            }));
+            if (staleCount > 0)
+            {
+                _polling.SetSubscriberCount(_subscribers.Count);
+                Log.Warn($"{LogPrefix} Disconnected {staleCount} slow combat telemetry subscriber(s).");
+            }
+        }
+    }
+
+    /// <summary>Expose a capture failure so consumers can mark the affected run incomplete.</summary>
+    public void PublishCombatHistoryError(string errorType)
+    {
+        lock (_gate)
+        {
+            if (_subscribers.Count == 0)
+            {
+                return;
+            }
+
+            var staleCount = _subscribers.Publish(BuildEnvelope("combat_history_capture_error", new
+            {
+                schema_version = 1,
+                error_type = errorType
+            }));
+            if (staleCount > 0)
+            {
+                _polling.SetSubscriberCount(_subscribers.Count);
+            }
         }
     }
 
