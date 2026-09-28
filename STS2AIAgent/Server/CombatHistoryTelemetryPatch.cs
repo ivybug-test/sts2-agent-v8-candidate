@@ -187,6 +187,65 @@ internal static class CombatHistoryTelemetryPatch
             character_id = player.Character?.Id.Entry
         },
         AbstractModel model => new { model_id = model.Id.Entry },
+        _ => ReadKnownRecord(value)
+    };
+
+    private static object? ReadKnownRecord(object value)
+    {
+        // These are resolution records, not live game objects. Capture only their directly
+        // typed values so damage and card attribution do not depend on localized descriptions.
+        if (value.GetType().Name is not ("DamageResult" or "CardPlay"))
+        {
+            return null;
+        }
+
+        Dictionary<string, object?> values = new(StringComparer.Ordinal);
+        foreach (var property in value.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
+        {
+            if (!property.CanRead || property.GetIndexParameters().Length != 0)
+            {
+                continue;
+            }
+            try
+            {
+                var fact = ReadDirectValue(property.GetValue(value));
+                if (fact != null)
+                {
+                    values[property.Name] = fact;
+                }
+            }
+            catch
+            {
+                // An individual resolution member may not be readable yet.
+            }
+        }
+        foreach (var field in value.GetType().GetFields(
+                     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            try
+            {
+                var fact = ReadDirectValue(field.GetValue(value));
+                if (fact != null)
+                {
+                    values["field_" + field.Name] = fact;
+                }
+            }
+            catch
+            {
+                // Keep the rest of the record if one field cannot be read.
+            }
+        }
+        return values.Count > 0 ? values : null;
+    }
+
+    private static object? ReadDirectValue(object? value) => value switch
+    {
+        null => null,
+        string or bool or byte or short or ushort or int or uint or long or ulong or
+            float or double or decimal => value,
+        Enum e => e.ToString(),
+        CardModel card => new { card_id = card.Id.Entry, instance_ref = RuntimeHelpers.GetHashCode(card) },
+        Creature creature => new { model_id = creature.ModelId.Entry, instance_ref = RuntimeHelpers.GetHashCode(creature) },
         _ => null
     };
 }
