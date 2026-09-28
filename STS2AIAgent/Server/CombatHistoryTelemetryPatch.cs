@@ -100,30 +100,7 @@ internal static class CombatHistoryTelemetryPatch
             try
             {
                 object? value = property.GetValue(entry);
-                object? fact = value switch
-                {
-                    null => null,
-                    string or bool or byte or short or int or long or float or double or decimal => value,
-                    Enum e => e.ToString(),
-                    CardModel card => new
-                    {
-                        card_id = card.Id.Entry,
-                        instance_ref = RuntimeHelpers.GetHashCode(card)
-                    },
-                    Creature creature => new
-                    {
-                        instance_ref = RuntimeHelpers.GetHashCode(creature),
-                        current_hp = creature.CurrentHp,
-                        block = creature.Block
-                    },
-                    Player player => new
-                    {
-                        player_id = player.NetId.ToString(),
-                        character_id = player.Character?.Id.Entry
-                    },
-                    AbstractModel model => new { model_id = model.Id.Entry },
-                    _ => null
-                };
+                object? fact = ReadFact(value);
                 if (fact != null)
                 {
                     facts[property.Name] = fact;
@@ -136,6 +113,57 @@ internal static class CombatHistoryTelemetryPatch
             }
         }
 
+        // Some history entries expose their resolved quantities only as fields. Keep their
+        // primitive values with explicit field_ provenance instead of parsing display text.
+        for (Type? type = entry.GetType(); type != null && type != typeof(object); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(
+                         BindingFlags.Instance | BindingFlags.Public |
+                         BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                try
+                {
+                    var fact = ReadFact(field.GetValue(entry));
+                    if (fact != null)
+                    {
+                        facts["field_" + field.Name] = fact;
+                    }
+                }
+                catch
+                {
+                    // A field may be unavailable during construction; omit it.
+                }
+            }
+        }
+
         return facts;
     }
+
+    private static object? ReadFact(object? value) => value switch
+    {
+        null => null,
+        string or bool or byte or short or ushort or int or uint or long or ulong or
+            float or double or decimal => value,
+        Enum e => e.ToString(),
+        CardModel card => new
+        {
+            card_id = card.Id.Entry,
+            instance_ref = RuntimeHelpers.GetHashCode(card)
+        },
+        Creature creature => new
+        {
+            model_id = creature.ModelId.Entry,
+            instance_ref = RuntimeHelpers.GetHashCode(creature),
+            current_hp = creature.CurrentHp,
+            max_hp = creature.MaxHp,
+            block = creature.Block
+        },
+        Player player => new
+        {
+            player_id = player.NetId.ToString(),
+            character_id = player.Character?.Id.Entry
+        },
+        AbstractModel model => new { model_id = model.Id.Entry },
+        _ => null
+    };
 }
