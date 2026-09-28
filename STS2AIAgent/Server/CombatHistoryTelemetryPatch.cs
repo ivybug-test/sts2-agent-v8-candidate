@@ -45,7 +45,7 @@ internal static class CombatHistoryTelemetryPatch
         }
     }
 
-    private static void Postfix(object __instance)
+    private static void Postfix(object __instance, MethodBase __originalMethod, object[] __args)
     {
         if (!GameEventService.Instance.HasSubscribers)
         {
@@ -62,7 +62,7 @@ internal static class CombatHistoryTelemetryPatch
                 run?.CurrentActIndex,
                 run?.TotalFloor,
                 combat?.RoundNumber,
-                ReadFacts(__instance));
+                ReadFacts(__instance, __originalMethod, __args));
         }
         catch (Exception ex)
         {
@@ -86,7 +86,8 @@ internal static class CombatHistoryTelemetryPatch
     /// Keep only primitive facts and stable public IDs. In particular, never serialize the full
     /// game object or an arbitrary ToString() value that might include hidden game information.
     /// </summary>
-    private static Dictionary<string, object?> ReadFacts(object entry)
+    private static Dictionary<string, object?> ReadFacts(
+        object entry, MethodBase constructor, object[] arguments)
     {
         Dictionary<string, object?> facts = new(StringComparer.Ordinal);
         foreach (var property in entry.GetType().GetProperties(
@@ -133,6 +134,28 @@ internal static class CombatHistoryTelemetryPatch
                 {
                     // A field may be unavailable during construction; omit it.
                 }
+            }
+        }
+
+        var parameters = constructor.GetParameters();
+        for (var index = 0; index < Math.Min(parameters.Length, arguments.Length); index++)
+        {
+            var name = parameters[index].Name ?? index.ToString();
+            try
+            {
+                var fact = ReadFact(arguments[index]);
+                if (fact != null)
+                {
+                    facts["arg_" + name] = fact;
+                }
+                else if (arguments[index] != null)
+                {
+                    facts["arg_type_" + name] = arguments[index].GetType().Name;
+                }
+            }
+            catch
+            {
+                // Preserve the action even when a constructor argument cannot be inspected.
             }
         }
 

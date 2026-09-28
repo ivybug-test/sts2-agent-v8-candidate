@@ -1620,7 +1620,7 @@ data: }
 | `combat_history_capture_error` | 一条战斗历史事件采集失败；载荷含异常类型。分析侧把当前 run 的相应指标标为缺测，不按零处理 |
 | `debug_churn` | 仅由调试动作 `inject_event_churn` 发布（需 `STS2_ENABLE_DEBUG_ACTIONS=1`）。载荷含 `synthetic: true` 与 1 起的 `index`，用于在实机里把慢订阅者的队列顶满 |
 
-`combat_history_entry.facts` 含历史条目的基础数值与对象标识；`field_` 前缀表示从条目实例字段读取、未经过展示文本解析；没有字段即表示该
+`combat_history_entry.facts` 含历史条目的基础数值与对象标识；`field_` 前缀表示从条目实例字段读取、`arg_` 前缀表示构造参数，均未经过展示文本解析；没有字段即表示该
 条目未提供或读取失败，不能解读为零。卡实例 `instance_ref` 只在当前游戏进程内用于
 关联，不是跨局稳定 ID。它是分析侧数据，`/state` 的策略可见内容不随此事件扩展。
 客户端需从战斗开始前保持订阅，并检查连续 `event_id`；断线后的缺口不能由快照补造。
