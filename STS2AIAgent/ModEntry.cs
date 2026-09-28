@@ -1,5 +1,6 @@
 using System.Threading;
 using Godot;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 using STS2AIAgent.Agent;
@@ -28,6 +29,15 @@ public static class ModEntry
         LocSource.Initialize();
         GameThread.Initialize();
         GameEventService.Instance.Start();
+        try
+        {
+            new Harmony("STS2AIAgent.CombatHistoryTelemetry").PatchAll(
+                typeof(CombatHistoryTelemetryPatch).Assembly);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{LogPrefix} Combat telemetry hooks unavailable: {ex}");
+        }
         HttpServer.Instance.Start();
         AgentRuntime.Instance.Initialize();
         // Before anything asks for a private game member, so a renamed one is in the log a player

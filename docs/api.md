@@ -1616,7 +1616,14 @@ data: }
 | `event_state_changed` | 事件内部状态变化 |
 | `available_actions_changed` | 可用动作集合变化 |
 | `decision_made` | 一次**被接受**的动作写进决策日志（与 `GET /decisions` 同一份记录）。载荷为 `id`、`source`、`action`、`reason`、`state_fingerprint`、`requests_spent`、`total_tokens`、`timestamp_utc`；被拒绝或失败的动作不发此事件 |
+| `combat_history_entry` | 游戏结算时产生一条战斗历史记录；载荷含 `schema_version=1`、`entry_type`、`run_id`、`act_index`、`floor`、`turn` 与 `facts`。覆盖抽牌、出牌、弃牌、消耗、生成、伤害、格挡、能量、能力、药水、球、召唤和星星变化。重复且内容相同的结算也逐条发布，不按状态事件去重 |
+| `combat_history_capture_error` | 一条战斗历史事件采集失败；载荷含异常类型。分析侧把当前 run 的相应指标标为缺测，不按零处理 |
 | `debug_churn` | 仅由调试动作 `inject_event_churn` 发布（需 `STS2_ENABLE_DEBUG_ACTIONS=1`）。载荷含 `synthetic: true` 与 1 起的 `index`，用于在实机里把慢订阅者的队列顶满 |
+
+`combat_history_entry.facts` 含历史条目的基础数值与对象标识；`field_` 前缀表示从条目实例字段读取、`arg_` 前缀表示构造参数，均未经过展示文本解析；没有字段即表示该
+条目未提供或读取失败，不能解读为零。卡实例 `instance_ref` 只在当前游戏进程内用于
+关联，不是跨局稳定 ID。它是分析侧数据，`/state` 的策略可见内容不随此事件扩展。
+客户端需从战斗开始前保持订阅，并检查连续 `event_id`；断线后的缺口不能由快照补造。
 
 **事件类型名由 `EventChurnPolicy.EventType` 常量给出，不是字面量。** 门禁的事件名提取只认字面量，所以这里显式说明：`debug_churn` 是变量拼出来的名字，不会被自动提取发现——新增任何**变量形式**的事件名时，必须同时更新本表和提取规则，否则两者都会静默漏检。
 

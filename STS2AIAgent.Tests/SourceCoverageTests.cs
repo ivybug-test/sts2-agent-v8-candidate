@@ -57,6 +57,7 @@ internal static class SourceCoverageTests
         "STS2AIAgent/Game/GameDataExportService.cs",
         "STS2AIAgent/Server/Router.cs",
         "STS2AIAgent/Server/GameEventService.cs",
+        "STS2AIAgent/Server/CombatHistoryTelemetryPatch.cs",
         "STS2AIAgent/Multiplayer/LocalDualInstanceLauncher.cs",
         "STS2AIAgent/Agent/GameBridge.cs",
         "STS2AIAgent/Multiplayer/DualInstanceCoordinator.cs",
