@@ -403,6 +403,9 @@ internal static partial class GameStateService
                 .Select(player => BuildCombatPlayerSummaryPayload(player, combatState, connectedPlayerIds, me.NetId))
                 .ToArray(),
             hand = hand.Select((card, index) => BuildHandCardPayload(combatState, card, index)).ToArray(),
+            draw_pile = BuildCombatPilePayload(combatState, me.PlayerCombatState.DrawPile.Cards),
+            discard_pile = BuildCombatPilePayload(combatState, me.PlayerCombatState.DiscardPile.Cards),
+            exhaust_pile = BuildCombatPilePayload(combatState, me.PlayerCombatState.ExhaustPile.Cards),
             enemies = enemyPayloads,
             end_turn_will_kill_player = lethalRisks.Any(risk => risk.will_kill_player),
             lethal_risks = lethalRisks

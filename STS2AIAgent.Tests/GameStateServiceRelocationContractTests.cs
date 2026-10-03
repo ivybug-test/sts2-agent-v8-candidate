@@ -100,7 +100,7 @@ internal static class GameStateServiceRelocationContractTests
         ["ResetCombatActionReadiness"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "aa3bec113453f87628ba0577d450cca0dd4c11b0c4c23c6dc7425ee343732cf8"),
         ["GetEndTurnButton"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "8f76bfc88b7b47c46491119d5d891be8a53afda09d94b127e64a548c57c53b0f"),
         ["BuildAvailableActionNames"] = ("STS2AIAgent/Game/GameStateService.cs", "3c92f32a9b0ad99acf6e8d37352f98a69bceb1b2f08c133777789d6c972317e9"),
-        ["BuildCombatPayload"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "977022bd18ecd793204c43f909ea7b6e30b8902378b5aa73f346a4761d80905c"),
+        ["BuildCombatPayload"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "b30e06ec0be3aa1977026a820b6e906c7e71df98b6f9268a62fa9f8b3d012174"),
         ["BuildCombatLethalRiskPayloads"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "c80fd4516a6c13c6894027d92dc247e89b18de25d939f529e7bba35b468b4a23"),
         ["IsSandpitPower"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "c423a99fb0c84cd3e162998b8b4c44c59ded64397b1577867da1e608c3f82696"),
         ["BuildRunPayload"] = ("STS2AIAgent/Game/GameStateService.Run.cs", "508e174d94ea305e2302be42f5db73510ebe2da5b4ac9c7008e972048d20cd11"),

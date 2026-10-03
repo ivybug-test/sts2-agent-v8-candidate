@@ -164,6 +164,12 @@ internal sealed class CombatPayload
 
     public CombatHandCardPayload[] hand { get; init; } = Array.Empty<CombatHandCardPayload>();
 
+    public CombatPileCardPayload[] draw_pile { get; init; } = Array.Empty<CombatPileCardPayload>();
+
+    public CombatPileCardPayload[] discard_pile { get; init; } = Array.Empty<CombatPileCardPayload>();
+
+    public CombatPileCardPayload[] exhaust_pile { get; init; } = Array.Empty<CombatPileCardPayload>();
+
     public CombatEnemyPayload[] enemies { get; init; } = Array.Empty<CombatEnemyPayload>();
 
     public bool end_turn_will_kill_player { get; init; }
