@@ -28,6 +28,8 @@ internal static class SourceCoverageTests
         // reason the base file does -- they read the game assemblies -- and the relocation contract
         // in GameStateServiceRelocationContractTests is what keeps them honest.
         "STS2AIAgent/Game/GameStateService.Combat.cs",
+        "STS2AIAgent/Game/GameStateService.CombatPiles.cs",
+        "STS2AIAgent/Game/GameStateService.CombatPoolPayloads.cs",
         "STS2AIAgent/Game/GameStateService.Map.cs",
         "STS2AIAgent/Game/GameStateService.Menus.cs",
         "STS2AIAgent/Game/GameStateService.Potions.cs",
