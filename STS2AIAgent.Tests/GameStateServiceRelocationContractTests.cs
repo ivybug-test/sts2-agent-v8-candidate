@@ -40,7 +40,7 @@ internal static class GameStateServiceRelocationContractTests
         ["BuildStatePayload"] = ("STS2AIAgent/Game/GameStateService.cs", "aeb4939075fe842dfa0c95d487024606267d4d1a743521cc7a203028b704a65e"),
         ["BuildSessionPayload"] = ("STS2AIAgent/Game/GameStateService.Menus.cs", "c5ba61aed0a963ac73c60c7ac9890a010329625a5db703557d300b66ffc53795"),
         ["BuildAvailableActionsPayload"] = ("STS2AIAgent/Game/GameStateService.cs", "f94bfce253aebe76836b96be74844eac681be85f9448f50c96a7617bcd7fb1ad"),
-        ["EnumerateAvailableActions"] = ("STS2AIAgent/Game/GameStateService.cs", "933b45a4c8c765a5bfd09471d850e956f54385168d3dc3ab02eed2643b9a66da"),
+        ["EnumerateAvailableActions"] = ("STS2AIAgent/Game/GameStateService.cs", "9551d5d25285e9c22481f0f78922ad28d6c8bd104b1515f465b6f50efb563162"),
         ["ResolveScreen"] = ("STS2AIAgent/Game/GameStateService.cs", "2d5f3c899e556f73ecd366debaee5110c253eedcb86b0b85de591e5a95d37ed3"),
         ["FindActiveCombatRoom"] = ("STS2AIAgent/Game/GameStateService.cs", "42717fd1bfc51e6798bf5336d03ee7dad905a31236f6424d0c0702a16de6b60f"),
         ["GetLocalPlayer"] = ("STS2AIAgent/Game/GameStateService.cs", "4d521866d4f33356a64c6346f8151bc401181c256b001360a729386efbf612df"),

@@ -405,6 +405,13 @@ internal static partial class GameActionService
         }
         else
         {
+            if (currentScreen is NChooseACardSelectionScreen)
+            {
+                // SelectHolder ignores Pressed during the first 350 ms after
+                // AfterOverlayOpened. The bridge can see the cards before that
+                // input gate opens; clicking immediately returns pending forever.
+                await Task.Delay(500);
+            }
             selected.EmitSignal(NCardHolder.SignalName.Pressed, selected);
         }
 

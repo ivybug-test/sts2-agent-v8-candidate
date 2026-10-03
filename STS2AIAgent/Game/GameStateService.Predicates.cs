@@ -546,6 +546,11 @@ internal static partial class GameStateService
         return SaveManager.Instance.HasMultiplayerRunSave;
     }
 
+    public static bool CanSetSeed(IScreenContext? currentScreen)
+    {
+        return currentScreen is NCharacterSelectScreen;
+    }
+
     public static bool CanEmbark(IScreenContext? currentScreen)
     {
         var embarkButton = GetCharacterEmbarkButton(currentScreen);

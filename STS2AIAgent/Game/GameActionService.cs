@@ -143,6 +143,7 @@ internal static partial class GameActionService
             "buy_potion" => ExecuteBuyPotionAsync(request),
             "remove_card_at_shop" => ExecuteRemoveCardAtShopAsync(),
             "select_character" => ExecuteSelectCharacterAsync(request),
+            "set_seed" => ExecuteSetSeedAsync(request),
             "embark" => ExecuteEmbarkAsync(),
             "unready" => ExecuteUnreadyAsync(),
             "host_multiplayer_lobby" => ExecuteHostMultiplayerLobbyAsync(),
@@ -1138,6 +1139,8 @@ internal sealed class ActionRequest
     public string? tool { get; init; }
 
     public string? command { get; init; }
+
+    public string? seed { get; init; }
 
     public string? player_id { get; init; }
 
