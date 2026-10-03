@@ -891,6 +891,8 @@ internal sealed class CombatHandCardPayload
 
     public string card_id { get; init; } = string.Empty;
 
+    public bool is_dupe { get; init; }
+
     public string name { get; init; } = string.Empty;
 
     public bool upgraded { get; init; }

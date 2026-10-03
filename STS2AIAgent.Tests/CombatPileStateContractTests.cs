@@ -14,6 +14,7 @@ internal static class CombatPileStateContractTests
         Assert.Contains("discard_pile=BuildCombatPilePayload(combatState,me.PlayerCombatState.DiscardPile.Cards)", combat);
         Assert.Contains("exhaust_pile=BuildCombatPilePayload(combatState,me.PlayerCombatState.ExhaustPile.Cards)", combat);
         Assert.Contains("card_id=card.Id.Entry", pile);
+        Assert.Contains("is_dupe=card.IsDupe", pile);
         Assert.Contains("dynamic_values=BuildCardDynamicValuePayloads(card)", pile);
         Assert.Contains("OrderBy(card=>card.card_id", pile);
     }

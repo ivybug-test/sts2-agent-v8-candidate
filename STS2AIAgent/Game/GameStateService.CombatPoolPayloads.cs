@@ -8,6 +8,8 @@ internal sealed class CombatPileCardPayload
 
     public bool upgraded { get; init; }
 
+    public bool is_dupe { get; init; }
+
     public bool is_upgradable { get; init; }
 
     public bool is_unplayable { get; init; }

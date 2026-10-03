@@ -21,6 +21,7 @@ internal static partial class GameStateService
         {
             card_id = card.Id.Entry,
             upgraded = card.IsUpgraded,
+            is_dupe = card.IsDupe,
             is_upgradable = card.IsUpgradable,
             is_unplayable = card.Keywords.Contains(CardKeyword.Unplayable),
             exhaust_on_play = card.Keywords.Contains(CardKeyword.Exhaust),
