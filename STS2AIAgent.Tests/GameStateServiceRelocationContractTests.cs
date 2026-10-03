@@ -125,7 +125,7 @@ internal static class GameStateServiceRelocationContractTests
         ["BuildModalPayload"] = ("STS2AIAgent/Game/GameStateService.Rooms.cs", "e50fe34507468878d3af92cf543889a8dbc320d1a93a086db164e3c0b973d7b6"),
         ["BuildGameOverPayload"] = ("STS2AIAgent/Game/GameStateService.Rooms.cs", "b152e93a13d1239bf1c9817b9cb33220f397ac755ea3667968fdf6175c2cc1ce"),
         ["VerifyGameOverProgressSave"] = ("STS2AIAgent/Game/GameStateService.Rooms.cs", "f417813a51c483c31608d612aefbe040cce4bdf6a97e4a6ec5f81f49b9dbfe0d"),
-        ["BuildHandCardPayload"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "a87ed5050ecad5b3090e532eb44314d1517664e6e260bde204b1e9810da61353"),
+        ["BuildHandCardPayload"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "51a183f867b272111534f067498d4d8dfa4302f9b50a5b890c41f586c8b5a57d"),
         ["GetModelIdEntry"] = ("STS2AIAgent/Game/GameStateService.cs", "a6bc7fd47caee58200cf2b4af006c24a62f11e89f3154de19bec4fb4abe8e745"),
         ["BuildEnemyPayload"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "61cf445651f34aa4415d3861c84c2fbf8aebb6de39f790eb3456cded6735b6f6"),
         ["BuildCreaturePowerPayloads"] = ("STS2AIAgent/Game/GameStateService.Combat.cs", "7ea2af1581dd4849d763f28fc645165e99d43ad3f8374857a3cf7942e4409042"),

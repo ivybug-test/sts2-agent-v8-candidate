@@ -484,6 +484,7 @@ internal static partial class GameStateService
         {
             index = index,
             card_id = card.Id.Entry,
+            is_dupe = card.IsDupe,
             name = card.Title,
             upgraded = card.IsUpgraded,
             target_type = card.TargetType.ToString(),
