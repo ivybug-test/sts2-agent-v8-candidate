@@ -677,6 +677,16 @@ internal static partial class GameStateService
             });
         }
 
+        if (CanSetSeed(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "set_seed",
+                requires_target = false,
+                requires_index = false
+            });
+        }
+
         if (CanEmbark(currentScreen))
         {
             descriptors.Add(new ActionDescriptor
