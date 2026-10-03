@@ -616,6 +616,7 @@ internal static class TestRunner
         yield return ("PredicateSplit.MovedPredicatesInPredicatePartial", () => Task.Run(PredicateRelocationContractTests.MovedPredicatesAreDeclaredInThePredicatePartialInSourceOrder));
         yield return ("PredicateSplit.SharedHelpersStayInBase", () => Task.Run(PredicateRelocationContractTests.SharedHelpersAreDeclaredOnceAcrossTheSplit));
         yield return ("StateSplit.MovedBodiesUnchanged", () => Task.Run(GameStateServiceRelocationContractTests.EveryMovedDeclarationStillMatchesItsPreSplitText));
+        yield return ("CombatPiles.StructuredFields", () => Task.Run(CombatPileStateContractTests.RawCombatIncludesStructuredPileCards));
         yield return ("StateSplit.BaseFileShrank", () => Task.Run(GameStateServiceRelocationContractTests.TheSplitActuallyShrankTheBaseFile));
         yield return ("PredicateSplit.BudgetCameDown", () => Task.Run(PredicateRelocationContractTests.TheSplitLoweredTheBaseBudgetInsteadOfRaisingIt));
         yield return ("ActionDiagnostics.NoWordlessRecoveryCatch", () => Task.Run(ActionDiagnosticsContractTests.NoRecoveryCatchSwallowsWithoutSayingSo));
